@@ -1,18 +1,29 @@
 package strslice
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"strings"
+)
 
 // StrSlice represents a string or an array of strings.
 // We need to override the json decoder to accept both options.
-type StrSlice []string
+type StrSlice struct {
+	parts []string
+}
 
-// UnmarshalJSON decodes the byte slice whether it's a string or an array of
-// strings. This method is needed to implement json.Unmarshaler.
+// MarshalJSON Marshals (or serializes) the StrSlice into the json format.
+// This method is needed to implement json.Marshaller.
+func (e *StrSlice) MarshalJSON() ([]byte, error) {
+	if e == nil {
+		return []byte{}, nil
+	}
+	return json.Marshal(e.Slice())
+}
+
+// UnmarshalJSON decodes the byte slice whether it's a string or an array of strings.
+// This method is needed to implement json.Unmarshaler.
 func (e *StrSlice) UnmarshalJSON(b []byte) error {
 	if len(b) == 0 {
-		// With no input, we preserve the existing value by returning nil and
-		// leaving the target alone. This allows defining default values for
-		// the type.
 		return nil
 	}
 
@@ -25,6 +36,36 @@ func (e *StrSlice) UnmarshalJSON(b []byte) error {
 		p = append(p, s)
 	}
 
-	*e = p
+	e.parts = p
 	return nil
+}
+
+// Len returns the number of parts of the StrSlice.
+func (e *StrSlice) Len() int {
+	if e == nil {
+		return 0
+	}
+	return len(e.parts)
+}
+
+// Slice gets the parts of the StrSlice as a Slice of string.
+func (e *StrSlice) Slice() []string {
+	if e == nil {
+		return nil
+	}
+	return e.parts
+}
+
+// ToString gets space separated string of all the parts.
+func (e *StrSlice) ToString() string {
+	s := e.Slice()
+	if s == nil {
+		return ""
+	}
+	return strings.Join(s, " ")
+}
+
+// New creates an StrSlice based on the specified parts (as strings).
+func New(parts ...string) *StrSlice {
+	return &StrSlice{parts}
 }

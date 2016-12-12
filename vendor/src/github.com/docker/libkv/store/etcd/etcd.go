@@ -75,9 +75,6 @@ func New(addrs []string, options *store.Config) (store.Store, error) {
 		if options.ConnectionTimeout != 0 {
 			setTimeout(cfg, options.ConnectionTimeout)
 		}
-		if options.Username != "" {
-			setCredentials(cfg, options.Username, options.Password)
-		}
 	}
 
 	c, err := etcd.New(*cfg)
@@ -120,12 +117,6 @@ func setTLS(cfg *etcd.Config, tls *tls.Config, addrs []string) {
 // setTimeout sets the timeout used for connecting to the store
 func setTimeout(cfg *etcd.Config, time time.Duration) {
 	cfg.HeaderTimeoutPerRequest = time
-}
-
-// setCredentials sets the username/password credentials for connecting to Etcd
-func setCredentials(cfg *etcd.Config, username, password string) {
-	cfg.Username = username
-	cfg.Password = password
 }
 
 // Normalize the key for usage in Etcd
@@ -344,10 +335,6 @@ func (s *Etcd) AtomicPut(key string, value []byte, previous *store.KVPair, opts 
 			if etcdError.Code == etcd.ErrorCodeTestFailed {
 				return false, nil, store.ErrKeyModified
 			}
-			// Node exists error (when PrevNoExist)
-			if etcdError.Code == etcd.ErrorCodeNodeExist {
-				return false, nil, store.ErrKeyExists
-			}
 		}
 		return false, nil, err
 	}
@@ -521,15 +508,15 @@ func (l *etcdLock) Lock(stopChan chan struct{}) (<-chan struct{}, error) {
 			// Wait for the key to be available or for
 			// a signal to stop trying to lock the key
 			select {
-			case <-free:
+			case _ = <-free:
 				break
 			case err := <-errorCh:
 				return nil, err
-			case <-stopChan:
+			case _ = <-stopChan:
 				return nil, ErrAbortTryLock
 			}
 
-			// Delete or Expire event occurred
+			// Delete or Expire event occured
 			// Retry
 		}
 	}

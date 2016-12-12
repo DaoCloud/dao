@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
-	"runtime"
 	"testing"
 	"time"
 
@@ -37,9 +36,6 @@ func TestPollerAddRemove(t *testing.T) {
 }
 
 func TestPollerEvent(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("No chmod on Windows")
-	}
 	w := NewPollingWatcher()
 
 	f, err := ioutil.TempFile("", "test-poller")

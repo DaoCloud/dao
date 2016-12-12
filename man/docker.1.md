@@ -12,7 +12,14 @@ docker \- Docker image and container command line interface
 **docker** [--help|-v|--version]
 
 # DESCRIPTION
-is a client for interacting with the daemon (see **dockerd(8)**) through the CLI.
+**docker** has two distinct functions. It is used for starting the Docker
+daemon and to run the CLI (i.e., to command the daemon to manage images,
+containers etc.) So **docker** is both a server, as a daemon, and a client
+to the daemon, through the CLI.
+
+To run the Docker daemon you can specify **docker daemon**.
+You can view the daemon options using **docker daemon --help**.
+To see the man page for the daemon, run **man docker daemon**.
 
 The Docker CLI has over 30 commands. The commands are listed below and each has
 its own man page which explain usage and arguments.
@@ -125,7 +132,7 @@ inside it)
   See **docker-load(1)** for full documentation on the **load** command.
 
 **login**
-  Log in to a Docker Registry
+  Register or login to a Docker Registry
   See **docker-login(1)** for full documentation on the **login** command.
 
 **logout**
@@ -217,15 +224,15 @@ inside it)
   See **docker-wait(1)** for full documentation on the **wait** command.
 
 
-# RUNTIME EXECUTION OPTIONS
+# EXEC DRIVER OPTIONS
 
 Use the **--exec-opt** flags to specify options to the execution driver.
 The following options are available:
 
 #### native.cgroupdriver
-Specifies the management of the container's `cgroups`. You can specify `cgroupfs`
-or `systemd`. If you specify `systemd` and it is not available, the system errors
-out.
+Specifies the management of the container's `cgroups`. You can specify 
+`cgroupfs` or `systemd`. If you specify `systemd` and it is not available, the 
+system uses `cgroupfs`.
 
 #### Client
 For specific client examples please see the man page for the specific Docker

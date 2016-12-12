@@ -7,17 +7,12 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"testing"
 
 	"github.com/docker/docker/pkg/ioutils"
 )
 
 func TestApplyLayerInvalidFilenames(t *testing.T) {
-	// TODO Windows: Figure out how to fix this test.
-	if runtime.GOOS == "windows" {
-		t.Skip("Passes but hits breakoutError: platform and architecture is not supported")
-	}
 	for i, headers := range [][]*tar.Header{
 		{
 			{
@@ -42,9 +37,6 @@ func TestApplyLayerInvalidFilenames(t *testing.T) {
 }
 
 func TestApplyLayerInvalidHardlink(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("TypeLink support on Windows")
-	}
 	for i, headers := range [][]*tar.Header{
 		{ // try reading victim/hello (../)
 			{
@@ -125,9 +117,6 @@ func TestApplyLayerInvalidHardlink(t *testing.T) {
 }
 
 func TestApplyLayerInvalidSymlink(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("TypeSymLink support on Windows")
-	}
 	for i, headers := range [][]*tar.Header{
 		{ // try reading victim/hello (../)
 			{
@@ -208,11 +197,6 @@ func TestApplyLayerInvalidSymlink(t *testing.T) {
 }
 
 func TestApplyLayerWhiteouts(t *testing.T) {
-	// TODO Windows: Figure out why this test fails
-	if runtime.GOOS == "windows" {
-		t.Skip("Failing on Windows")
-	}
-
 	wd, err := ioutil.TempDir("", "graphdriver-test-whiteouts")
 	if err != nil {
 		return

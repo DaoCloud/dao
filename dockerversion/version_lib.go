@@ -9,5 +9,8 @@ const (
 	GitCommit string = "library-import"
 	Version   string = "library-import"
 	BuildTime string = "library-import"
+
 	IAmStatic string = "library-import"
+	InitSHA1  string = "library-import"
+	InitPath  string = "library-import"
 )

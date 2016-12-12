@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"path"
 	"strings"
 	"time"
 
@@ -11,8 +12,8 @@ import (
 	"github.com/docker/notary/client/changelist"
 	tuf "github.com/docker/notary/tuf"
 	"github.com/docker/notary/tuf/data"
+	"github.com/docker/notary/tuf/keys"
 	"github.com/docker/notary/tuf/store"
-	"github.com/docker/notary/tuf/utils"
 )
 
 // Use this to initialize remote HTTPStores from the config settings
@@ -21,6 +22,7 @@ func getRemoteStore(baseURL, gun string, rt http.RoundTripper) (store.RemoteStor
 		baseURL+"/v2/"+gun+"/_trust/tuf/",
 		"",
 		"json",
+		"",
 		"key",
 		rt,
 	)
@@ -78,55 +80,73 @@ func changeTargetsDelegation(repo *tuf.Repo, c changelist.Change) error {
 		if err != nil {
 			return err
 		}
-
-		// Try to create brand new role or update one
-		// First add the keys, then the paths.  We can only add keys and paths in this scenario
-		err = repo.UpdateDelegationKeys(c.Scope(), td.AddKeys, []string{}, td.NewThreshold)
+		r, err := repo.GetDelegation(c.Scope())
+		if _, ok := err.(data.ErrNoSuchRole); err != nil && !ok {
+			// error that wasn't ErrNoSuchRole
+			return err
+		}
+		if err == nil {
+			// role existed, attempt to merge paths and keys
+			if err := r.AddPaths(td.AddPaths); err != nil {
+				return err
+			}
+			return repo.UpdateDelegations(r, td.AddKeys)
+		}
+		// create brand new role
+		r, err = td.ToNewRole(c.Scope())
 		if err != nil {
 			return err
 		}
-		return repo.UpdateDelegationPaths(c.Scope(), td.AddPaths, []string{}, false)
+		return repo.UpdateDelegations(r, td.AddKeys)
 	case changelist.ActionUpdate:
 		td := changelist.TufDelegation{}
 		err := json.Unmarshal(c.Content(), &td)
 		if err != nil {
 			return err
 		}
-		delgRole, err := repo.GetDelegationRole(c.Scope())
+		r, err := repo.GetDelegation(c.Scope())
 		if err != nil {
 			return err
 		}
-
-		// We need to translate the keys from canonical ID to TUF ID for compatibility
-		canonicalToTUFID := make(map[string]string)
-		for tufID, pubKey := range delgRole.Keys {
-			canonicalID, err := utils.CanonicalKeyID(pubKey)
-			if err != nil {
-				return err
-			}
-			canonicalToTUFID[canonicalID] = tufID
-		}
-
-		removeTUFKeyIDs := []string{}
-		for _, canonID := range td.RemoveKeys {
-			removeTUFKeyIDs = append(removeTUFKeyIDs, canonicalToTUFID[canonID])
-		}
-
 		// If we specify the only keys left delete the role, else just delete specified keys
-		if strings.Join(delgRole.ListKeyIDs(), ";") == strings.Join(removeTUFKeyIDs, ";") && len(td.AddKeys) == 0 {
-			return repo.DeleteDelegation(c.Scope())
+		if strings.Join(r.KeyIDs, ";") == strings.Join(td.RemoveKeys, ";") && len(td.AddKeys) == 0 {
+			r := data.Role{Name: c.Scope()}
+			return repo.DeleteDelegation(r)
 		}
-		err = repo.UpdateDelegationKeys(c.Scope(), td.AddKeys, removeTUFKeyIDs, td.NewThreshold)
-		if err != nil {
+		// if we aren't deleting and the role exists, merge
+		if err := r.AddPaths(td.AddPaths); err != nil {
 			return err
 		}
-		return repo.UpdateDelegationPaths(c.Scope(), td.AddPaths, td.RemovePaths, td.ClearAllPaths)
+		if err := r.AddPathHashPrefixes(td.AddPathHashPrefixes); err != nil {
+			return err
+		}
+		r.RemoveKeys(td.RemoveKeys)
+		r.RemovePaths(td.RemovePaths)
+		r.RemovePathHashPrefixes(td.RemovePathHashPrefixes)
+		return repo.UpdateDelegations(r, td.AddKeys)
 	case changelist.ActionDelete:
-		return repo.DeleteDelegation(c.Scope())
+		r := data.Role{Name: c.Scope()}
+		return repo.DeleteDelegation(r)
 	default:
 		return fmt.Errorf("unsupported action against delegations: %s", c.Action())
 	}
 
+}
+
+// applies a function repeatedly, falling back on the parent role, until it no
+// longer can
+func doWithRoleFallback(role string, doFunc func(string) error) error {
+	for role == data.CanonicalTargetsRole || data.IsDelegation(role) {
+		err := doFunc(role)
+		if err == nil {
+			return nil
+		}
+		if _, ok := err.(data.ErrInvalidRole); !ok {
+			return err
+		}
+		role = path.Dir(role)
+	}
+	return data.ErrInvalidRole{Role: role}
 }
 
 func changeTargetMeta(repo *tuf.Repo, c changelist.Change) error {
@@ -141,16 +161,21 @@ func changeTargetMeta(repo *tuf.Repo, c changelist.Change) error {
 		}
 		files := data.Files{c.Path(): *meta}
 
-		// Attempt to add the target to this role
-		if _, err = repo.AddTargets(c.Scope(), files); err != nil {
+		err = doWithRoleFallback(c.Scope(), func(role string) error {
+			_, e := repo.AddTargets(role, files)
+			return e
+		})
+		if err != nil {
 			logrus.Errorf("couldn't add target to %s: %s", c.Scope(), err.Error())
 		}
 
 	case changelist.ActionDelete:
 		logrus.Debug("changelist remove: ", c.Path())
 
-		// Attempt to remove the target from this role
-		if err = repo.RemoveTargets(c.Scope(), c.Path()); err != nil {
+		err = doWithRoleFallback(c.Scope(), func(role string) error {
+			return repo.RemoveTargets(role, c.Path())
+		})
+		if err != nil {
 			logrus.Errorf("couldn't remove target from %s: %s", c.Scope(), err.Error())
 		}
 
@@ -212,6 +237,19 @@ func getRemoteKey(url, gun, role string, rt http.RoundTripper) (data.PublicKey, 
 	}
 
 	return pubKey, nil
+}
+
+// add a key to a KeyDB, and create a role for the key and add it.
+func addKeyForRole(kdb *keys.KeyDB, role string, key data.PublicKey) error {
+	theRole, err := data.NewRole(role, 1, []string{key.ID()}, nil, nil)
+	if err != nil {
+		return err
+	}
+	kdb.AddKey(key)
+	if err := kdb.AddRole(theRole); err != nil {
+		return err
+	}
+	return nil
 }
 
 // signs and serializes the metadata for a canonical role in a tuf repo to JSON

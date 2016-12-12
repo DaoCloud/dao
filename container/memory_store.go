@@ -5,7 +5,7 @@ import "sync"
 // memoryStore implements a Store in memory.
 type memoryStore struct {
 	s map[string]*Container
-	sync.RWMutex
+	sync.Mutex
 }
 
 // NewMemoryStore initializes a new memory store.
@@ -25,9 +25,9 @@ func (c *memoryStore) Add(id string, cont *Container) {
 
 // Get returns a container from the store by id.
 func (c *memoryStore) Get(id string) *Container {
-	c.RLock()
+	c.Lock()
 	res := c.s[id]
-	c.RUnlock()
+	c.Unlock()
 	return res
 }
 
@@ -41,21 +41,28 @@ func (c *memoryStore) Delete(id string) {
 // List returns a sorted list of containers from the store.
 // The containers are ordered by creation date.
 func (c *memoryStore) List() []*Container {
-	containers := History(c.all())
+	containers := new(History)
+	c.Lock()
+	for _, cont := range c.s {
+		containers.Add(cont)
+	}
+	c.Unlock()
 	containers.sort()
-	return containers
+	return *containers
 }
 
 // Size returns the number of containers in the store.
 func (c *memoryStore) Size() int {
-	c.RLock()
-	defer c.RUnlock()
+	c.Lock()
+	defer c.Unlock()
 	return len(c.s)
 }
 
 // First returns the first container found in the store by a given filter.
 func (c *memoryStore) First(filter StoreFilter) *Container {
-	for _, cont := range c.all() {
+	c.Lock()
+	defer c.Unlock()
+	for _, cont := range c.s {
 		if filter(cont) {
 			return cont
 		}
@@ -65,10 +72,12 @@ func (c *memoryStore) First(filter StoreFilter) *Container {
 
 // ApplyAll calls the reducer function with every container in the store.
 // This operation is asyncronous in the memory store.
-// NOTE: Modifications to the store MUST NOT be done by the StoreReducer.
 func (c *memoryStore) ApplyAll(apply StoreReducer) {
+	c.Lock()
+	defer c.Unlock()
+
 	wg := new(sync.WaitGroup)
-	for _, cont := range c.all() {
+	for _, cont := range c.s {
 		wg.Add(1)
 		go func(container *Container) {
 			apply(container)
@@ -77,16 +86,6 @@ func (c *memoryStore) ApplyAll(apply StoreReducer) {
 	}
 
 	wg.Wait()
-}
-
-func (c *memoryStore) all() []*Container {
-	c.RLock()
-	containers := make([]*Container, 0, len(c.s))
-	for _, cont := range c.s {
-		containers = append(containers, cont)
-	}
-	c.RUnlock()
-	return containers
 }
 
 var _ Store = &memoryStore{}

@@ -5,7 +5,6 @@ import (
 	"io"
 	"io/ioutil"
 	"strings"
-	"sync"
 
 	"github.com/docker/docker/pkg/broadcaster"
 	"github.com/docker/docker/pkg/ioutils"
@@ -21,7 +20,6 @@ import (
 // copied and delivered to all StdoutPipe and StderrPipe consumers, using
 // a kind of "broadcaster".
 type StreamConfig struct {
-	sync.WaitGroup
 	stdout    *broadcaster.Unbuffered
 	stderr    *broadcaster.Unbuffered
 	stdin     io.ReadCloser
@@ -60,7 +58,7 @@ func (streamConfig *StreamConfig) StdinPipe() io.WriteCloser {
 // StdoutPipe creates a new io.ReadCloser with an empty bytes pipe.
 // It adds this new out pipe to the Stdout broadcaster.
 func (streamConfig *StreamConfig) StdoutPipe() io.ReadCloser {
-	bytesPipe := ioutils.NewBytesPipe()
+	bytesPipe := ioutils.NewBytesPipe(nil)
 	streamConfig.stdout.Add(bytesPipe)
 	return bytesPipe
 }
@@ -68,7 +66,7 @@ func (streamConfig *StreamConfig) StdoutPipe() io.ReadCloser {
 // StderrPipe creates a new io.ReadCloser with an empty bytes pipe.
 // It adds this new err pipe to the Stderr broadcaster.
 func (streamConfig *StreamConfig) StderrPipe() io.ReadCloser {
-	bytesPipe := ioutils.NewBytesPipe()
+	bytesPipe := ioutils.NewBytesPipe(nil)
 	streamConfig.stderr.Add(bytesPipe)
 	return bytesPipe
 }

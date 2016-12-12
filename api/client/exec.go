@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"io"
 
-	"golang.org/x/net/context"
-
 	"github.com/Sirupsen/logrus"
 	Cli "github.com/docker/docker/cli"
 	flag "github.com/docker/docker/pkg/mflag"
@@ -17,13 +15,12 @@ import (
 //
 // Usage: docker exec [OPTIONS] CONTAINER COMMAND [ARG...]
 func (cli *DockerCli) CmdExec(args ...string) error {
-	cmd := Cli.Subcmd("exec", []string{"[OPTIONS] CONTAINER COMMAND [ARG...]"}, Cli.DockerCommands["exec"].Description, true)
+	cmd := Cli.Subcmd("exec", []string{"CONTAINER COMMAND [ARG...]"}, Cli.DockerCommands["exec"].Description, true)
 	detachKeys := cmd.String([]string{"-detach-keys"}, "", "覆盖从容器停止附加的退出键顺序")
 
 	execConfig, err := ParseExec(cmd, args)
-	container := cmd.Arg(0)
 	// just in case the ParseExec does not exit
-	if container == "" || err != nil {
+	if execConfig.Container == "" || err != nil {
 		return Cli.StatusError{StatusCode: 1}
 	}
 
@@ -34,9 +31,7 @@ func (cli *DockerCli) CmdExec(args ...string) error {
 	// Send client escape keys
 	execConfig.DetachKeys = cli.configFile.DetachKeys
 
-	ctx := context.Background()
-
-	response, err := cli.client.ContainerExecCreate(ctx, container, *execConfig)
+	response, err := cli.client.ContainerExecCreate(*execConfig)
 	if err != nil {
 		return err
 	}
@@ -58,7 +53,7 @@ func (cli *DockerCli) CmdExec(args ...string) error {
 			Tty:    execConfig.Tty,
 		}
 
-		if err := cli.client.ContainerExecStart(ctx, execID, execStartCheck); err != nil {
+		if err := cli.client.ContainerExecStart(execID, execStartCheck); err != nil {
 			return err
 		}
 		// For now don't print this - wait for when we support exec wait()
@@ -87,18 +82,24 @@ func (cli *DockerCli) CmdExec(args ...string) error {
 		}
 	}
 
-	resp, err := cli.client.ContainerExecAttach(ctx, execID, *execConfig)
+	resp, err := cli.client.ContainerExecAttach(execID, *execConfig)
 	if err != nil {
 		return err
 	}
 	defer resp.Close()
+	if in != nil && execConfig.Tty {
+		if err := cli.setRawTerminal(); err != nil {
+			return err
+		}
+		defer cli.restoreTerminal(in)
+	}
 	errCh = promise.Go(func() error {
-		return cli.HoldHijackedConnection(ctx, execConfig.Tty, in, out, stderr, resp)
+		return cli.holdHijackedConnection(execConfig.Tty, in, out, stderr, resp)
 	})
 
 	if execConfig.Tty && cli.isTerminalIn {
-		if err := cli.MonitorTtySize(ctx, execID, true); err != nil {
-			fmt.Fprintf(cli.err, "Error monitoring TTY size: %s\n", err)
+		if err := cli.monitorTtySize(execID, true); err != nil {
+			fmt.Fprintf(cli.err, "监视终端大小出错: %s\n", err)
 		}
 	}
 
@@ -108,7 +109,7 @@ func (cli *DockerCli) CmdExec(args ...string) error {
 	}
 
 	var status int
-	if _, status, err = cli.getExecExitCode(ctx, execID); err != nil {
+	if _, status, err = getExecExitCode(cli, execID); err != nil {
 		return err
 	}
 
@@ -125,17 +126,19 @@ func (cli *DockerCli) CmdExec(args ...string) error {
 // not valid, it will return an error.
 func ParseExec(cmd *flag.FlagSet, args []string) (*types.ExecConfig, error) {
 	var (
-		flStdin      = cmd.Bool([]string{"i", "-interactive"}, false, "即使容器没有被附加标准输出，标准错误，也爆出输出输入的畅通")
+		flStdin      = cmd.Bool([]string{"i", "-interactive"}, false, "即使容器没有被附加标准输出，标准错误，也爆出输入输出的畅通")
 		flTty        = cmd.Bool([]string{"t", "-tty"}, false, "分配一个伪终端")
-		flDetach     = cmd.Bool([]string{"d", "-detach"}, false, "后台模式: 在后台运行用户指定的命令")
+		flDetach     = cmd.Bool([]string{"d", "-detach"}, false, "后台模式：在后台运行用户指定的命令")
 		flUser       = cmd.String([]string{"u", "-user"}, "", "用户名或用户名ID (格式: <用户名|用户名ID>[:<组|组ID>])")
 		flPrivileged = cmd.Bool([]string{"-privileged"}, false, "为运行命令授予格外的特权")
 		execCmd      []string
+		container    string
 	)
 	cmd.Require(flag.Min, 2)
 	if err := cmd.ParseFlags(args, true); err != nil {
 		return nil, err
 	}
+	container = cmd.Arg(0)
 	parsedArgs := cmd.Args()
 	execCmd = parsedArgs[1:]
 
@@ -144,6 +147,7 @@ func ParseExec(cmd *flag.FlagSet, args []string) (*types.ExecConfig, error) {
 		Privileged: *flPrivileged,
 		Tty:        *flTty,
 		Cmd:        execCmd,
+		Container:  container,
 		Detach:     *flDetach,
 	}
 

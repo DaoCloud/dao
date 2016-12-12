@@ -23,7 +23,8 @@ func toShort(path string) (string, error) {
 	}
 	if n > uint32(len(b)) {
 		b = make([]uint16, n)
-		if _, err = syscall.GetShortPathName(&p[0], &b[0], uint32(len(b))); err != nil {
+		n, err = syscall.GetShortPathName(&p[0], &b[0], uint32(len(b)))
+		if err != nil {
 			return "", err
 		}
 	}

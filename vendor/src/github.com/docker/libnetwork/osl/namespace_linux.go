@@ -2,14 +2,10 @@ package osl
 
 import (
 	"fmt"
-	"io/ioutil"
 	"net"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
-	"strconv"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -22,7 +18,7 @@ import (
 	"github.com/vishvananda/netns"
 )
 
-const defaultPrefix = "/var/run/docker"
+const prefix = "/var/run/docker/netns"
 
 var (
 	once             sync.Once
@@ -31,7 +27,7 @@ var (
 	gpmWg            sync.WaitGroup
 	gpmCleanupPeriod = 60 * time.Second
 	gpmChan          = make(chan chan struct{})
-	prefix           = defaultPrefix
+	nsOnce           sync.Once
 )
 
 // The networkNamespace type is the linux implementation of the Sandbox
@@ -46,25 +42,15 @@ type networkNamespace struct {
 	neighbors    []*neigh
 	nextIfIndex  int
 	isDefault    bool
-	nlHandle     *netlink.Handle
 	sync.Mutex
-}
-
-// SetBasePath sets the base url prefix for the ns path
-func SetBasePath(path string) {
-	prefix = path
 }
 
 func init() {
 	reexec.Register("netns-create", reexecCreateNamespace)
 }
 
-func basePath() string {
-	return filepath.Join(prefix, "netns")
-}
-
 func createBasePath() {
-	err := os.MkdirAll(basePath(), 0755)
+	err := os.MkdirAll(prefix, 0755)
 	if err != nil {
 		panic("Could not create net namespace path directory")
 	}
@@ -146,77 +132,22 @@ func GC() {
 // container id.
 func GenerateKey(containerID string) string {
 	maxLen := 12
-	// Read sandbox key from host for overlay
-	if strings.HasPrefix(containerID, "-") {
-		var (
-			index    int
-			indexStr string
-			tmpkey   string
-		)
-		dir, err := ioutil.ReadDir(basePath())
-		if err != nil {
-			return ""
-		}
-
-		for _, v := range dir {
-			id := v.Name()
-			if strings.HasSuffix(id, containerID[:maxLen-1]) {
-				indexStr = strings.TrimSuffix(id, containerID[:maxLen-1])
-				tmpindex, err := strconv.Atoi(indexStr)
-				if err != nil {
-					return ""
-				}
-				if tmpindex > index {
-					index = tmpindex
-					tmpkey = id
-				}
-
-			}
-		}
-		containerID = tmpkey
-		if containerID == "" {
-			return ""
-		}
-	}
-
 	if len(containerID) < maxLen {
 		maxLen = len(containerID)
 	}
 
-	return basePath() + "/" + containerID[:maxLen]
+	return prefix + "/" + containerID[:maxLen]
 }
 
 // NewSandbox provides a new sandbox instance created in an os specific way
 // provided a key which uniquely identifies the sandbox
-func NewSandbox(key string, osCreate, isRestore bool) (Sandbox, error) {
-	if !isRestore {
-		err := createNetworkNamespace(key, osCreate)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		once.Do(createBasePath)
-	}
-
-	n := &networkNamespace{path: key, isDefault: !osCreate}
-
-	sboxNs, err := netns.GetFromPath(n.path)
+func NewSandbox(key string, osCreate bool) (Sandbox, error) {
+	err := createNetworkNamespace(key, osCreate)
 	if err != nil {
-		return nil, fmt.Errorf("failed get network namespace %q: %v", n.path, err)
-	}
-	defer sboxNs.Close()
-
-	n.nlHandle, err = netlink.NewHandleAt(sboxNs, syscall.NETLINK_ROUTE)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create a netlink handle: %v", err)
-	}
-
-	if err = n.loopbackUp(); err != nil {
-		n.nlHandle.Delete()
 		return nil, err
 	}
 
-	return n, nil
+	return &networkNamespace{path: key, isDefault: !osCreate}, nil
 }
 
 func (n *networkNamespace) InterfaceOptions() IfaceOptionSetter {
@@ -228,37 +159,30 @@ func (n *networkNamespace) NeighborOptions() NeighborOptionSetter {
 }
 
 func mountNetworkNamespace(basePath string, lnPath string) error {
-	return syscall.Mount(basePath, lnPath, "bind", syscall.MS_BIND, "")
+	if err := syscall.Mount(basePath, lnPath, "bind", syscall.MS_BIND, ""); err != nil {
+		return err
+	}
+
+	if err := loopbackUp(); err != nil {
+		return err
+	}
+	return nil
 }
 
 // GetSandboxForExternalKey returns sandbox object for the supplied path
 func GetSandboxForExternalKey(basePath string, key string) (Sandbox, error) {
-	if err := createNamespaceFile(key); err != nil {
+	var err error
+	if err = createNamespaceFile(key); err != nil {
 		return nil, err
 	}
-
-	if err := mountNetworkNamespace(basePath, key); err != nil {
-		return nil, err
-	}
-	n := &networkNamespace{path: key}
-
-	sboxNs, err := netns.GetFromPath(n.path)
+	n := &networkNamespace{path: basePath}
+	n.InvokeFunc(func() {
+		err = mountNetworkNamespace(basePath, key)
+	})
 	if err != nil {
-		return nil, fmt.Errorf("failed get network namespace %q: %v", n.path, err)
-	}
-	defer sboxNs.Close()
-
-	n.nlHandle, err = netlink.NewHandleAt(sboxNs, syscall.NETLINK_ROUTE)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create a netlink handle: %v", err)
-	}
-
-	if err = n.loopbackUp(); err != nil {
-		n.nlHandle.Delete()
 		return nil, err
 	}
-
-	return n, nil
+	return &networkNamespace{path: key}, nil
 }
 
 func reexecCreateNamespace() {
@@ -319,12 +243,12 @@ func createNamespaceFile(path string) (err error) {
 	return err
 }
 
-func (n *networkNamespace) loopbackUp() error {
-	iface, err := n.nlHandle.LinkByName("lo")
+func loopbackUp() error {
+	iface, err := netlink.LinkByName("lo")
 	if err != nil {
 		return err
 	}
-	return n.nlHandle.LinkSetUp(iface)
+	return netlink.LinkSetUp(iface)
 }
 
 func (n *networkNamespace) InvokeFunc(f func()) error {
@@ -337,28 +261,32 @@ func (n *networkNamespace) InvokeFunc(f func()) error {
 // InitOSContext initializes OS context while configuring network resources
 func InitOSContext() func() {
 	runtime.LockOSThread()
+	nsOnce.Do(ns.Init)
 	if err := ns.SetNamespace(); err != nil {
 		log.Error(err)
 	}
+
 	return runtime.UnlockOSThread
 }
 
 func nsInvoke(path string, prefunc func(nsFD int) error, postfunc func(callerFD int) error) error {
 	defer InitOSContext()()
 
-	newNs, err := netns.GetFromPath(path)
+	f, err := os.OpenFile(path, os.O_RDONLY, 0)
 	if err != nil {
 		return fmt.Errorf("failed get network namespace %q: %v", path, err)
 	}
-	defer newNs.Close()
+	defer f.Close()
+
+	nsFD := f.Fd()
 
 	// Invoked before the namespace switch happens but after the namespace file
 	// handle is obtained.
-	if err := prefunc(int(newNs)); err != nil {
+	if err := prefunc(int(nsFD)); err != nil {
 		return fmt.Errorf("failed in prefunc: %v", err)
 	}
 
-	if err = netns.Set(newNs); err != nil {
+	if err = netns.Set(netns.NsHandle(nsFD)); err != nil {
 		return err
 	}
 	defer ns.SetNamespace()
@@ -383,9 +311,6 @@ func (n *networkNamespace) Key() string {
 }
 
 func (n *networkNamespace) Destroy() error {
-	if n.nlHandle != nil {
-		n.nlHandle.Delete()
-	}
 	// Assuming no running process is executing in this network namespace,
 	// unmounting is sufficient to destroy it.
 	if err := syscall.Unmount(n.path, syscall.MNT_DETACH); err != nil {
@@ -394,107 +319,5 @@ func (n *networkNamespace) Destroy() error {
 
 	// Stash it into the garbage collection list
 	addToGarbagePaths(n.path)
-	return nil
-}
-
-// Restore restore the network namespace
-func (n *networkNamespace) Restore(ifsopt map[string][]IfaceOption, routes []*types.StaticRoute, gw net.IP, gw6 net.IP) error {
-	// restore interfaces
-	for name, opts := range ifsopt {
-		if !strings.Contains(name, "+") {
-			return fmt.Errorf("wrong iface name in restore osl sandbox interface: %s", name)
-		}
-		seps := strings.Split(name, "+")
-		srcName := seps[0]
-		dstPrefix := seps[1]
-		i := &nwIface{srcName: srcName, dstName: dstPrefix, ns: n}
-		i.processInterfaceOptions(opts...)
-		if i.master != "" {
-			i.dstMaster = n.findDst(i.master, true)
-			if i.dstMaster == "" {
-				return fmt.Errorf("could not find an appropriate master %q for %q",
-					i.master, i.srcName)
-			}
-		}
-		if n.isDefault {
-			i.dstName = i.srcName
-		} else {
-			links, err := n.nlHandle.LinkList()
-			if err != nil {
-				return fmt.Errorf("failed to retrieve list of links in network namespace %q during restore", n.path)
-			}
-			// due to the docker network connect/disconnect, so the dstName should
-			// restore from the namespace
-			for _, link := range links {
-				addrs, err := n.nlHandle.AddrList(link, netlink.FAMILY_V4)
-				if err != nil {
-					return err
-				}
-				ifaceName := link.Attrs().Name
-				if strings.HasPrefix(ifaceName, "vxlan") {
-					if i.dstName == "vxlan" {
-						i.dstName = ifaceName
-						break
-					}
-				}
-				// find the interface name by ip
-				if i.address != nil {
-					for _, addr := range addrs {
-						if addr.IPNet.String() == i.address.String() {
-							i.dstName = ifaceName
-							break
-						}
-						continue
-					}
-					if i.dstName == ifaceName {
-						break
-					}
-				}
-				// This is to find the interface name of the pair in overlay sandbox
-				if strings.HasPrefix(ifaceName, "veth") {
-					if i.master != "" && i.dstName == "veth" {
-						i.dstName = ifaceName
-					}
-				}
-			}
-
-			var index int
-			indexStr := strings.TrimPrefix(i.dstName, dstPrefix)
-			if indexStr != "" {
-				index, err = strconv.Atoi(indexStr)
-				if err != nil {
-					return err
-				}
-			}
-			index++
-			n.Lock()
-			if index > n.nextIfIndex {
-				n.nextIfIndex = index
-			}
-			n.iFaces = append(n.iFaces, i)
-			n.Unlock()
-		}
-	}
-
-	// restore routes
-	for _, r := range routes {
-		n.Lock()
-		n.staticRoutes = append(n.staticRoutes, r)
-		n.Unlock()
-	}
-
-	// restore gateway
-	if len(gw) > 0 {
-		n.Lock()
-		n.gw = gw
-		n.Unlock()
-	}
-
-	if len(gw6) > 0 {
-		n.Lock()
-		n.gwv6 = gw6
-		n.Unlock()
-	}
-
 	return nil
 }

@@ -21,10 +21,6 @@ func SetProcessLabel(processLabel string) error {
 	return nil
 }
 
-func GetFileLabel(path string) (string, error) {
-	return "", nil
-}
-
 func SetFileLabel(path string, fileLabel string) error {
 	return nil
 }
@@ -52,7 +48,7 @@ func UnreserveLabel(label string) error {
 	return nil
 }
 
-// DupSecOpt takes a process label and returns security options that
+// DupSecOpt takes an process label and returns security options that
 // can be used to set duplicate labels on future container processes
 func DupSecOpt(src string) []string {
 	return nil

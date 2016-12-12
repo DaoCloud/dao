@@ -1,10 +1,10 @@
 package daemon
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/Sirupsen/logrus"
+	derr "github.com/docker/docker/errors"
 	"github.com/docker/libnetwork"
 )
 
@@ -18,11 +18,7 @@ func (daemon *Daemon) ContainerRename(oldName, newName string) error {
 	)
 
 	if oldName == "" || newName == "" {
-		return fmt.Errorf("Neither old nor new names may be empty")
-	}
-
-	if newName[0] != '/' {
-		newName = "/" + newName
+		return derr.ErrorCodeEmptyRename
 	}
 
 	container, err := daemon.GetContainer(oldName)
@@ -31,26 +27,18 @@ func (daemon *Daemon) ContainerRename(oldName, newName string) error {
 	}
 
 	oldName = container.Name
-	oldIsAnonymousEndpoint := container.NetworkSettings.IsAnonymousEndpoint
-
-	if oldName == newName {
-		return fmt.Errorf("Renaming a container with the same name as its current name")
-	}
 
 	container.Lock()
 	defer container.Unlock()
-
 	if newName, err = daemon.reserveName(container.ID, newName); err != nil {
-		return fmt.Errorf("Error when allocating new name: %v", err)
+		return derr.ErrorCodeRenameTaken.WithArgs(err)
 	}
 
 	container.Name = newName
-	container.NetworkSettings.IsAnonymousEndpoint = false
 
 	defer func() {
 		if err != nil {
 			container.Name = oldName
-			container.NetworkSettings.IsAnonymousEndpoint = oldIsAnonymousEndpoint
 			daemon.reserveName(container.ID, oldName)
 			daemon.releaseName(newName)
 		}
@@ -61,19 +49,14 @@ func (daemon *Daemon) ContainerRename(oldName, newName string) error {
 		return err
 	}
 
-	attributes := map[string]string{
-		"oldName": oldName,
-	}
-
 	if !container.Running {
-		daemon.LogContainerEventWithAttributes(container, "rename", attributes)
+		daemon.LogContainerEvent(container, "rename")
 		return nil
 	}
 
 	defer func() {
 		if err != nil {
 			container.Name = oldName
-			container.NetworkSettings.IsAnonymousEndpoint = oldIsAnonymousEndpoint
 			if e := container.ToDisk(); e != nil {
 				logrus.Errorf("%s: Failed in writing to Disk on rename failure: %v", container.ID, e)
 			}
@@ -81,18 +64,15 @@ func (daemon *Daemon) ContainerRename(oldName, newName string) error {
 	}()
 
 	sid = container.NetworkSettings.SandboxID
-	if daemon.netController != nil {
-		sb, err = daemon.netController.SandboxByID(sid)
-		if err != nil {
-			return err
-		}
-
-		err = sb.Rename(strings.TrimPrefix(container.Name, "/"))
-		if err != nil {
-			return err
-		}
+	sb, err = daemon.netController.SandboxByID(sid)
+	if err != nil {
+		return err
 	}
 
-	daemon.LogContainerEventWithAttributes(container, "rename", attributes)
+	err = sb.Rename(strings.TrimPrefix(container.Name, "/"))
+	if err != nil {
+		return err
+	}
+	daemon.LogContainerEvent(container, "rename")
 	return nil
 }

@@ -8,10 +8,14 @@ import (
 	"os"
 )
 
-// This interface allows us to work with both local and network connections,
-// and enables Solaris support (see syslog_unix.go).
+// This interface and the separate syslog_unix.go file exist for
+// Solaris support as implemented by gccgo.  On Solaris you can not
+// simply open a TCP connection to the syslog daemon.  The gccgo
+// sources have a syslog_solaris.go file that implements unixSyslog to
+// return a type that satisfies this interface and simply calls the C
+// library syslog function.
 type serverConn interface {
-	writeString(framer Framer, formatter Formatter, p Priority, hostname, tag, s string) error
+	writeString(p Priority, hostname, tag, s string) error
 	close() error
 }
 
@@ -35,19 +39,11 @@ func Dial(network, raddr string, priority Priority, tag string) (*Writer, error)
 // address raddr on the specified network. It uses certPath to load TLS certificates and configure
 // the secure connection.
 func DialWithTLSCertPath(network, raddr string, priority Priority, tag, certPath string) (*Writer, error) {
+	pool := x509.NewCertPool()
 	serverCert, err := ioutil.ReadFile(certPath)
 	if err != nil {
 		return nil, err
 	}
-
-	return DialWithTLSCert(network, raddr, priority, tag, serverCert)
-}
-
-// DialWIthTLSCert establishes a secure connection to a log daemon by connecting to
-// address raddr on the specified network. It uses serverCert to load a TLS certificate
-// and configure the secure connection.
-func DialWithTLSCert(network, raddr string, priority Priority, tag string, serverCert []byte) (*Writer, error) {
-	pool := x509.NewCertPool()
 	pool.AppendCertsFromPEM(serverCert)
 	config := tls.Config{
 		RootCAs: pool,

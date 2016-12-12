@@ -1,15 +1,19 @@
 package build
 
-import "github.com/docker/docker/api/server/router"
+import (
+	"github.com/docker/docker/api/server/router"
+	"github.com/docker/docker/api/server/router/local"
+	"github.com/docker/docker/daemon"
+)
 
 // buildRouter is a router to talk with the build controller
 type buildRouter struct {
-	backend Backend
+	backend *daemon.Daemon
 	routes  []router.Route
 }
 
 // NewRouter initializes a new build router
-func NewRouter(b Backend) router.Router {
+func NewRouter(b *daemon.Daemon) router.Router {
 	r := &buildRouter{
 		backend: b,
 	}
@@ -24,6 +28,6 @@ func (r *buildRouter) Routes() []router.Route {
 
 func (r *buildRouter) initRoutes() {
 	r.routes = []router.Route{
-		router.Cancellable(router.NewPostRoute("/build", r.postBuild)),
+		local.NewPostRoute("/build", r.postBuild),
 	}
 }

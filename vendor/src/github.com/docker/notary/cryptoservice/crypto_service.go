@@ -3,6 +3,7 @@ package cryptoservice
 import (
 	"crypto/rand"
 	"fmt"
+	"path/filepath"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/docker/notary/trustmanager"
@@ -16,16 +17,17 @@ const (
 // CryptoService implements Sign and Create, holding a specific GUN and keystore to
 // operate on
 type CryptoService struct {
+	gun       string
 	keyStores []trustmanager.KeyStore
 }
 
 // NewCryptoService returns an instance of CryptoService
-func NewCryptoService(keyStores ...trustmanager.KeyStore) *CryptoService {
-	return &CryptoService{keyStores: keyStores}
+func NewCryptoService(gun string, keyStores ...trustmanager.KeyStore) *CryptoService {
+	return &CryptoService{gun: gun, keyStores: keyStores}
 }
 
 // Create is used to generate keys for targets, snapshots and timestamps
-func (cs *CryptoService) Create(role, gun, algorithm string) (data.PublicKey, error) {
+func (cs *CryptoService) Create(role, algorithm string) (data.PublicKey, error) {
 	var privKey data.PrivateKey
 	var err error
 
@@ -50,9 +52,16 @@ func (cs *CryptoService) Create(role, gun, algorithm string) (data.PublicKey, er
 	}
 	logrus.Debugf("generated new %s key for role: %s and keyID: %s", algorithm, role, privKey.ID())
 
-	// Store the private key into our keystore
+	// Store the private key into our keystore with the name being: /GUN/ID.key with an alias of role
+	var keyPath string
+	if role == data.CanonicalRootRole {
+		keyPath = privKey.ID()
+	} else {
+		keyPath = filepath.Join(cs.gun, privKey.ID())
+	}
+
 	for _, ks := range cs.keyStores {
-		err = ks.AddKey(trustmanager.KeyInfo{Role: role, Gun: gun}, privKey)
+		err = ks.AddKey(keyPath, role, privKey)
 		if err == nil {
 			return data.PublicKeyFromPrivate(privKey), nil
 		}
@@ -65,16 +74,23 @@ func (cs *CryptoService) Create(role, gun, algorithm string) (data.PublicKey, er
 }
 
 // GetPrivateKey returns a private key and role if present by ID.
+// It tries to get the key first without a GUN (in which case it's a root key).
+// If that fails, try to get the key with the GUN (non-root key).
+// If that fails, then we don't have the key.
 func (cs *CryptoService) GetPrivateKey(keyID string) (k data.PrivateKey, role string, err error) {
+	keyPaths := []string{keyID, filepath.Join(cs.gun, keyID)}
 	for _, ks := range cs.keyStores {
-		if k, role, err = ks.GetKey(keyID); err == nil {
-			return
-		}
-		switch err.(type) {
-		case trustmanager.ErrPasswordInvalid, trustmanager.ErrAttemptsExceeded:
-			return
-		default:
-			continue
+		for _, keyPath := range keyPaths {
+			k, role, err = ks.GetKey(keyPath)
+			if err == nil {
+				return
+			}
+			switch err.(type) {
+			case trustmanager.ErrPasswordInvalid, trustmanager.ErrAttemptsExceeded:
+				return
+			default:
+				continue
+			}
 		}
 	}
 	return // returns whatever the final values were
@@ -89,42 +105,12 @@ func (cs *CryptoService) GetKey(keyID string) data.PublicKey {
 	return data.PublicKeyFromPrivate(privKey)
 }
 
-// GetKeyInfo returns role and GUN info of a key by ID
-func (cs *CryptoService) GetKeyInfo(keyID string) (trustmanager.KeyInfo, error) {
-	for _, store := range cs.keyStores {
-		if info, err := store.GetKeyInfo(keyID); err == nil {
-			return info, nil
-		}
-	}
-	return trustmanager.KeyInfo{}, fmt.Errorf("Could not find info for keyID %s", keyID)
-}
-
 // RemoveKey deletes a key by ID
 func (cs *CryptoService) RemoveKey(keyID string) (err error) {
+	keyPaths := []string{keyID, filepath.Join(cs.gun, keyID)}
 	for _, ks := range cs.keyStores {
-		ks.RemoveKey(keyID)
-	}
-	return // returns whatever the final values were
-}
-
-// AddKey adds a private key to a specified role.
-// The GUN is inferred from the cryptoservice itself for non-root roles
-func (cs *CryptoService) AddKey(role, gun string, key data.PrivateKey) (err error) {
-	// First check if this key already exists in any of our keystores
-	for _, ks := range cs.keyStores {
-		if keyInfo, err := ks.GetKeyInfo(key.ID()); err == nil {
-			if keyInfo.Role != role {
-				return fmt.Errorf("key with same ID already exists for role: %s", keyInfo.Role)
-			}
-			logrus.Debugf("key with same ID %s and role %s already exists", key.ID(), keyInfo.Role)
-			return nil
-		}
-	}
-	// If the key didn't exist in any of our keystores, add and return on the first successful keystore
-	for _, ks := range cs.keyStores {
-		// Try to add to this keystore, return if successful
-		if err = ks.AddKey(trustmanager.KeyInfo{Role: role, Gun: gun}, key); err == nil {
-			return nil
+		for _, keyPath := range keyPaths {
+			ks.RemoveKey(keyPath)
 		}
 	}
 	return // returns whatever the final values were
@@ -135,7 +121,7 @@ func (cs *CryptoService) ListKeys(role string) []string {
 	var res []string
 	for _, ks := range cs.keyStores {
 		for k, r := range ks.ListKeys() {
-			if r.Role == role {
+			if r == role {
 				res = append(res, k)
 			}
 		}
@@ -148,7 +134,7 @@ func (cs *CryptoService) ListAllKeys() map[string]string {
 	res := make(map[string]string)
 	for _, ks := range cs.keyStores {
 		for k, r := range ks.ListKeys() {
-			res[k] = r.Role // keys are content addressed so don't care about overwrites
+			res[k] = r // keys are content addressed so don't care about overwrites
 		}
 	}
 	return res

@@ -27,7 +27,6 @@ func decodeLogLine(dec *json.Decoder, l *jsonlog.JSONLog) (*logger.Message, erro
 		Source:    l.Stream,
 		Timestamp: l.Created,
 		Line:      []byte(l.Log),
-		Attrs:     l.Attrs,
 	}
 	return msg, nil
 }
@@ -55,6 +54,7 @@ func (l *JSONFileLogger) readLogs(logWatcher *logger.LogWatcher, config logger.R
 			}
 			continue
 		}
+		defer f.Close()
 		files = append(files, f)
 	}
 
@@ -63,23 +63,16 @@ func (l *JSONFileLogger) readLogs(logWatcher *logger.LogWatcher, config logger.R
 		logWatcher.Err <- err
 		return
 	}
+	defer latestFile.Close()
+
+	files = append(files, latestFile)
+	tailer := ioutils.MultiReadSeeker(files...)
 
 	if config.Tail != 0 {
-		tailer := ioutils.MultiReadSeeker(append(files, latestFile)...)
 		tailFile(tailer, logWatcher, config.Tail, config.Since)
 	}
 
-	// close all the rotated files
-	for _, f := range files {
-		if err := f.(io.Closer).Close(); err != nil {
-			logrus.WithField("logger", "json-file").Warnf("error closing tailed log file: %v", err)
-		}
-	}
-
 	if !config.Follow {
-		if err := latestFile.Close(); err != nil {
-			logrus.Errorf("Error closing file: %v", err)
-		}
 		return
 	}
 
@@ -136,23 +129,7 @@ func followLogs(f *os.File, logWatcher *logger.LogWatcher, notifyRotate chan int
 	if err != nil {
 		logWatcher.Err <- err
 	}
-	defer func() {
-		f.Close()
-		fileWatcher.Close()
-	}()
-	name := f.Name()
-
-	if err := fileWatcher.Add(name); err != nil {
-		logrus.WithField("logger", "json-file").Warnf("falling back to file poller due to error: %v", err)
-		fileWatcher.Close()
-		fileWatcher = filenotify.NewPollingWatcher()
-
-		if err := fileWatcher.Add(name); err != nil {
-			logrus.Debugf("error watching log file for modifications: %v", err)
-			logWatcher.Err <- err
-			return
-		}
-	}
+	defer fileWatcher.Close()
 
 	var retries int
 	for {
@@ -176,42 +153,42 @@ func followLogs(f *os.File, logWatcher *logger.LogWatcher, notifyRotate chan int
 					retries++
 					continue
 				}
-
+				logWatcher.Err <- err
 				return
 			}
 
+			logrus.WithField("logger", "json-file").Debugf("waiting for events")
+			if err := fileWatcher.Add(f.Name()); err != nil {
+				logrus.WithField("logger", "json-file").Warn("falling back to file poller")
+				fileWatcher.Close()
+				fileWatcher = filenotify.NewPollingWatcher()
+				if err := fileWatcher.Add(f.Name()); err != nil {
+					logrus.Errorf("error watching log file for modifications: %v", err)
+					logWatcher.Err <- err
+				}
+			}
 			select {
 			case <-fileWatcher.Events():
 				dec = json.NewDecoder(f)
+				fileWatcher.Remove(f.Name())
 				continue
 			case <-fileWatcher.Errors():
+				fileWatcher.Remove(f.Name())
 				logWatcher.Err <- err
 				return
 			case <-logWatcher.WatchClose():
-				fileWatcher.Remove(name)
+				fileWatcher.Remove(f.Name())
 				return
 			case <-notifyRotate:
-				f.Close()
-				fileWatcher.Remove(name)
-
-				// retry when the file doesn't exist
-				for retries := 0; retries <= 5; retries++ {
-					f, err = os.Open(name)
-					if err == nil || !os.IsNotExist(err) {
-						break
-					}
-				}
-
-				if err = fileWatcher.Add(name); err != nil {
-					logWatcher.Err <- err
-					return
-				}
+				f, err = os.Open(f.Name())
 				if err != nil {
 					logWatcher.Err <- err
 					return
 				}
 
 				dec = json.NewDecoder(f)
+				fileWatcher.Remove(f.Name())
+				fileWatcher.Add(f.Name())
 				continue
 			}
 		}

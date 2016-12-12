@@ -2,14 +2,12 @@ package system
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/docker/docker/api"
 	"github.com/docker/docker/api/server/httputils"
-	"github.com/docker/docker/errors"
 	"github.com/docker/docker/pkg/ioutils"
 	"github.com/docker/engine-api/types"
 	"github.com/docker/engine-api/types/events"
@@ -33,16 +31,13 @@ func (s *systemRouter) getInfo(ctx context.Context, w http.ResponseWriter, r *ht
 	if err != nil {
 		return err
 	}
-	if s.clusterProvider != nil {
-		info.Swarm = s.clusterProvider.Info()
-	}
 
 	return httputils.WriteJSON(w, http.StatusOK, info)
 }
 
 func (s *systemRouter) getVersion(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
 	info := s.backend.SystemVersion()
-	info.APIVersion = api.DefaultVersion
+	info.APIVersion = api.DefaultVersion.String()
 
 	return httputils.WriteJSON(w, http.StatusOK, info)
 }
@@ -51,33 +46,20 @@ func (s *systemRouter) getEvents(ctx context.Context, w http.ResponseWriter, r *
 	if err := httputils.ParseForm(r); err != nil {
 		return err
 	}
-
-	since, err := eventTime(r.Form.Get("since"))
+	since, sinceNano, err := timetypes.ParseTimestamps(r.Form.Get("since"), -1)
 	if err != nil {
 		return err
 	}
-	until, err := eventTime(r.Form.Get("until"))
+	until, untilNano, err := timetypes.ParseTimestamps(r.Form.Get("until"), -1)
 	if err != nil {
 		return err
 	}
 
-	var (
-		timeout        <-chan time.Time
-		onlyPastEvents bool
-	)
-	if !until.IsZero() {
-		if until.Before(since) {
-			return errors.NewBadRequestError(fmt.Errorf("`since` time (%s) cannot be after `until` time (%s)", r.Form.Get("since"), r.Form.Get("until")))
-		}
-
-		now := time.Now()
-
-		onlyPastEvents = until.Before(now)
-
-		if !onlyPastEvents {
-			dur := until.Sub(now)
-			timeout = time.NewTimer(dur).C
-		}
+	timer := time.NewTimer(0)
+	timer.Stop()
+	if until > 0 || untilNano > 0 {
+		dur := time.Unix(until, untilNano).Sub(time.Now())
+		timer = time.NewTimer(dur)
 	}
 
 	ef, err := filters.FromParam(r.Form.Get("filters"))
@@ -86,13 +68,20 @@ func (s *systemRouter) getEvents(ctx context.Context, w http.ResponseWriter, r *
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+
+	// This is to ensure that the HTTP status code is sent immediately,
+	// so that it will not block the receiver.
+	w.WriteHeader(http.StatusOK)
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+
 	output := ioutils.NewWriteFlusher(w)
 	defer output.Close()
-	output.Flush()
 
 	enc := json.NewEncoder(output)
 
-	buffered, l := s.backend.SubscribeToEvents(since, until, ef)
+	buffered, l := s.backend.SubscribeToEvents(since, sinceNano, ef)
 	defer s.backend.UnsubscribeFromEvents(l)
 
 	for _, ev := range buffered {
@@ -101,8 +90,9 @@ func (s *systemRouter) getEvents(ctx context.Context, w http.ResponseWriter, r *
 		}
 	}
 
-	if onlyPastEvents {
-		return nil
+	var closeNotify <-chan bool
+	if closeNotifier, ok := w.(http.CloseNotifier); ok {
+		closeNotify = closeNotifier.CloseNotify()
 	}
 
 	for {
@@ -116,10 +106,10 @@ func (s *systemRouter) getEvents(ctx context.Context, w http.ResponseWriter, r *
 			if err := enc.Encode(jev); err != nil {
 				return err
 			}
-		case <-timeout:
+		case <-timer.C:
 			return nil
-		case <-ctx.Done():
-			logrus.Debug("Client context cancelled, stop sending events")
+		case <-closeNotify:
+			logrus.Debug("Client disconnected, stop sending events")
 			return nil
 		}
 	}
@@ -132,23 +122,11 @@ func (s *systemRouter) postAuth(ctx context.Context, w http.ResponseWriter, r *h
 	if err != nil {
 		return err
 	}
-	status, token, err := s.backend.AuthenticateToRegistry(ctx, config)
+	status, err := s.backend.AuthenticateToRegistry(config)
 	if err != nil {
 		return err
 	}
 	return httputils.WriteJSON(w, http.StatusOK, &types.AuthResponse{
-		Status:        status,
-		IdentityToken: token,
+		Status: status,
 	})
-}
-
-func eventTime(formTime string) (time.Time, error) {
-	t, tNano, err := timetypes.ParseTimestamps(formTime, -1)
-	if err != nil {
-		return time.Time{}, err
-	}
-	if t == -1 {
-		return time.Time{}, nil
-	}
-	return time.Unix(t, tNano), nil
 }

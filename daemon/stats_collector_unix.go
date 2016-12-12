@@ -1,10 +1,9 @@
-// +build !windows,!solaris
+// +build !windows
 
 package daemon
 
 import (
 	"bufio"
-	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -13,15 +12,15 @@ import (
 
 	"github.com/Sirupsen/logrus"
 	"github.com/docker/docker/container"
+	"github.com/docker/docker/daemon/execdriver"
+	derr "github.com/docker/docker/errors"
 	"github.com/docker/docker/pkg/pubsub"
-	sysinfo "github.com/docker/docker/pkg/system"
-	"github.com/docker/engine-api/types"
 	"github.com/opencontainers/runc/libcontainer/system"
 )
 
 type statsSupervisor interface {
 	// GetContainerStats collects all the stats related to a container
-	GetContainerStats(container *container.Container) (*types.StatsJSON, error)
+	GetContainerStats(container *container.Container) (*execdriver.ResourceStats, error)
 }
 
 // newStatsCollector returns a new statsCollector that collections
@@ -36,11 +35,6 @@ func (daemon *Daemon) newStatsCollector(interval time.Duration) *statsCollector 
 		clockTicksPerSecond: uint64(system.GetClockTicks()),
 		bufReader:           bufio.NewReaderSize(nil, 128),
 	}
-	meminfo, err := sysinfo.ReadMemInfo()
-	if err == nil && meminfo.MemTotal > 0 {
-		s.machineMemory = uint64(meminfo.MemTotal)
-	}
-
 	go s.run()
 	return s
 }
@@ -53,7 +47,6 @@ type statsCollector struct {
 	clockTicksPerSecond uint64
 	publishers          map[*container.Container]*pubsub.Publisher
 	bufReader           *bufio.Reader
-	machineMemory       uint64
 }
 
 // collect registers the container with the collector and adds it to
@@ -127,15 +120,14 @@ func (s *statsCollector) run() {
 		for _, pair := range pairs {
 			stats, err := s.supervisor.GetContainerStats(pair.container)
 			if err != nil {
-				if _, ok := err.(errNotRunning); !ok {
+				if err != execdriver.ErrNotRunning {
 					logrus.Errorf("collecting stats for %s: %v", pair.container.ID, err)
 				}
 				continue
 			}
-			// FIXME: move to containerd
-			stats.CPUStats.SystemUsage = systemUsage
+			stats.SystemUsage = systemUsage
 
-			pair.publisher.Publish(*stats)
+			pair.publisher.Publish(stats)
 		}
 	}
 }
@@ -171,13 +163,13 @@ func (s *statsCollector) getSystemCPUUsage() (uint64, error) {
 		switch parts[0] {
 		case "cpu":
 			if len(parts) < 8 {
-				return 0, fmt.Errorf("invalid number of cpu fields")
+				return 0, derr.ErrorCodeBadCPUFields
 			}
 			var totalClockTicks uint64
 			for _, i := range parts[1:8] {
 				v, err := strconv.ParseUint(i, 10, 64)
 				if err != nil {
-					return 0, fmt.Errorf("Unable to convert value %s to int: %s", i, err)
+					return 0, derr.ErrorCodeBadCPUInt.WithArgs(i, err)
 				}
 				totalClockTicks += v
 			}
@@ -185,5 +177,5 @@ func (s *statsCollector) getSystemCPUUsage() (uint64, error) {
 				s.clockTicksPerSecond, nil
 		}
 	}
-	return 0, fmt.Errorf("invalid stat format. Error trying to parse the '/proc/stat' file")
+	return 0, derr.ErrorCodeBadStatFormat
 }

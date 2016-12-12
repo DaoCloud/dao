@@ -1,31 +1,26 @@
 package registry
 
 import (
-	"net/url"
+	"fmt"
 	"strings"
 
+	"github.com/docker/docker/reference"
 	"github.com/docker/go-connections/tlsconfig"
 )
 
-func (s *DefaultService) lookupV2Endpoints(hostname string) (endpoints []APIEndpoint, err error) {
+func (s *Service) lookupV2Endpoints(repoName reference.Named) (endpoints []APIEndpoint, err error) {
 	var cfg = tlsconfig.ServerDefault
 	tlsConfig := &cfg
-	if hostname == DefaultNamespace || hostname == DefaultV1Registry.Host {
+	nameString := repoName.FullName()
+	if strings.HasPrefix(nameString, DefaultNamespace+"/") {
 		// v2 mirrors
-		for _, mirror := range s.config.Mirrors {
-			if !strings.HasPrefix(mirror, "http://") && !strings.HasPrefix(mirror, "https://") {
-				mirror = "https://" + mirror
-			}
-			mirrorURL, err := url.Parse(mirror)
-			if err != nil {
-				return nil, err
-			}
-			mirrorTLSConfig, err := s.tlsConfigForMirror(mirrorURL)
+		for _, mirror := range s.Config.Mirrors {
+			mirrorTLSConfig, err := s.tlsConfigForMirror(mirror)
 			if err != nil {
 				return nil, err
 			}
 			endpoints = append(endpoints, APIEndpoint{
-				URL: mirrorURL,
+				URL: mirror,
 				// guess mirrors are v2
 				Version:      APIVersion2,
 				Mirror:       true,
@@ -45,6 +40,12 @@ func (s *DefaultService) lookupV2Endpoints(hostname string) (endpoints []APIEndp
 		return endpoints, nil
 	}
 
+	slashIndex := strings.IndexRune(nameString, '/')
+	if slashIndex <= 0 {
+		return nil, fmt.Errorf("invalid repo name: missing '/':  %s", nameString)
+	}
+	hostname := nameString[:slashIndex]
+
 	tlsConfig, err = s.TLSConfig(hostname)
 	if err != nil {
 		return nil, err
@@ -52,10 +53,7 @@ func (s *DefaultService) lookupV2Endpoints(hostname string) (endpoints []APIEndp
 
 	endpoints = []APIEndpoint{
 		{
-			URL: &url.URL{
-				Scheme: "https",
-				Host:   hostname,
-			},
+			URL:          "https://" + hostname,
 			Version:      APIVersion2,
 			TrimHostname: true,
 			TLSConfig:    tlsConfig,
@@ -64,10 +62,7 @@ func (s *DefaultService) lookupV2Endpoints(hostname string) (endpoints []APIEndp
 
 	if tlsConfig.InsecureSkipVerify {
 		endpoints = append(endpoints, APIEndpoint{
-			URL: &url.URL{
-				Scheme: "http",
-				Host:   hostname,
-			},
+			URL:          "http://" + hostname,
 			Version:      APIVersion2,
 			TrimHostname: true,
 			// used to check if supposed to be secure via InsecureSkipVerify

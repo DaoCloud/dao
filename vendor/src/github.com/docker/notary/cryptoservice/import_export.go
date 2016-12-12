@@ -31,9 +31,9 @@ var (
 	ErrNoKeysFoundForGUN = errors.New("no keys found for specified GUN")
 )
 
-// ExportKey exports the specified private key to an io.Writer in PEM format.
+// ExportRootKey exports the specified root key to an io.Writer in PEM format.
 // The key's existing encryption is preserved.
-func (cs *CryptoService) ExportKey(dest io.Writer, keyID, role string) error {
+func (cs *CryptoService) ExportRootKey(dest io.Writer, keyID string) error {
 	var (
 		pemBytes []byte
 		err      error
@@ -59,15 +59,10 @@ func (cs *CryptoService) ExportKey(dest io.Writer, keyID, role string) error {
 	return nil
 }
 
-// ExportKeyReencrypt exports the specified private key to an io.Writer in
+// ExportRootKeyReencrypt exports the specified root key to an io.Writer in
 // PEM format. The key is reencrypted with a new passphrase.
-func (cs *CryptoService) ExportKeyReencrypt(dest io.Writer, keyID string, newPassphraseRetriever passphrase.Retriever) error {
-	privateKey, _, err := cs.GetPrivateKey(keyID)
-	if err != nil {
-		return err
-	}
-
-	keyInfo, err := cs.GetKeyInfo(keyID)
+func (cs *CryptoService) ExportRootKeyReencrypt(dest io.Writer, keyID string, newPassphraseRetriever passphrase.Retriever) error {
+	privateKey, role, err := cs.GetPrivateKey(keyID)
 	if err != nil {
 		return err
 	}
@@ -81,7 +76,7 @@ func (cs *CryptoService) ExportKeyReencrypt(dest io.Writer, keyID string, newPas
 		return err
 	}
 
-	err = tempKeyStore.AddKey(keyInfo, privateKey)
+	err = tempKeyStore.AddKey(keyID, role, privateKey)
 	if err != nil {
 		return err
 	}
@@ -98,6 +93,29 @@ func (cs *CryptoService) ExportKeyReencrypt(dest io.Writer, keyID string, newPas
 		return errors.New("Unable to finish writing exported key.")
 	}
 	return nil
+}
+
+// ImportRootKey imports a root in PEM format key from an io.Reader
+// It prompts for the key's passphrase to verify the data and to determine
+// the key ID.
+func (cs *CryptoService) ImportRootKey(source io.Reader) error {
+	pemBytes, err := ioutil.ReadAll(source)
+	if err != nil {
+		return err
+	}
+
+	if err = checkRootKeyIsEncrypted(pemBytes); err != nil {
+		return err
+	}
+
+	for _, ks := range cs.keyStores {
+		// don't redeclare err, we want the value carried out of the loop
+		if err = ks.ImportKey(pemBytes, "root"); err == nil {
+			return nil //bail on the first keystore we import to
+		}
+	}
+
+	return err
 }
 
 // ExportAllKeys exports all keys to an io.Writer in zip format.
@@ -132,7 +150,7 @@ func (cs *CryptoService) ExportAllKeys(dest io.Writer, newPassphraseRetriever pa
 // ImportKeysZip imports keys from a zip file provided as an zip.Reader. The
 // keys in the root_keys directory are left encrypted, but the other keys are
 // decrypted with the specified passphrase.
-func (cs *CryptoService) ImportKeysZip(zipReader zip.Reader, retriever passphrase.Retriever) error {
+func (cs *CryptoService) ImportKeysZip(zipReader zip.Reader) error {
 	// Temporarily store the keys in maps, so we can bail early if there's
 	// an error (for example, wrong passphrase), without leaving the key
 	// store in an inconsistent state
@@ -141,6 +159,7 @@ func (cs *CryptoService) ImportKeysZip(zipReader zip.Reader, retriever passphras
 	// Iterate through the files in the archive. Don't add the keys
 	for _, f := range zipReader.File {
 		fNameTrimmed := strings.TrimSuffix(f.Name, filepath.Ext(f.Name))
+
 		rc, err := f.Open()
 		if err != nil {
 			return err
@@ -155,7 +174,7 @@ func (cs *CryptoService) ImportKeysZip(zipReader zip.Reader, retriever passphras
 		// Note that using / as a separator is okay here - the zip
 		// package guarantees that the separator will be /
 		if fNameTrimmed[len(fNameTrimmed)-5:] == "_root" {
-			if err = CheckRootKeyIsEncrypted(fileBytes); err != nil {
+			if err = checkRootKeyIsEncrypted(fileBytes); err != nil {
 				return err
 			}
 		}
@@ -163,21 +182,22 @@ func (cs *CryptoService) ImportKeysZip(zipReader zip.Reader, retriever passphras
 	}
 
 	for keyName, pemBytes := range newKeys {
-		// Get the key role information as well as its data.PrivateKey representation
-		_, keyInfo, err := trustmanager.KeyInfoFromPEM(pemBytes, keyName)
-		if err != nil {
-			return err
+		if keyName[len(keyName)-5:] == "_root" {
+			keyName = "root"
 		}
-		privKey, err := trustmanager.ParsePEMPrivateKey(pemBytes, "")
-		if err != nil {
-			privKey, _, err = trustmanager.GetPasswdDecryptBytes(retriever, pemBytes, "", "imported "+keyInfo.Role)
-			if err != nil {
-				return err
+		// try to import the key to all key stores. As long as one of them
+		// succeeds, consider it a success
+		var tmpErr error
+		for _, ks := range cs.keyStores {
+			if err := ks.ImportKey(pemBytes, keyName); err != nil {
+				tmpErr = err
+			} else {
+				tmpErr = nil
+				break
 			}
 		}
-		// Add the key to our cryptoservice, will add to the first successful keystore
-		if err = cs.AddKey(keyInfo.Role, keyInfo.Gun, privKey); err != nil {
-			return err
+		if tmpErr != nil {
+			return tmpErr
 		}
 	}
 
@@ -219,18 +239,18 @@ func (cs *CryptoService) ExportKeysByGUN(dest io.Writer, gun string, passphraseR
 }
 
 func moveKeysByGUN(oldKeyStore, newKeyStore trustmanager.KeyStore, gun string) error {
-	for keyID, keyInfo := range oldKeyStore.ListKeys() {
+	for relKeyPath := range oldKeyStore.ListKeys() {
 		// Skip keys that aren't associated with this GUN
-		if keyInfo.Gun != gun {
+		if !strings.HasPrefix(relKeyPath, filepath.FromSlash(gun)) {
 			continue
 		}
 
-		privKey, _, err := oldKeyStore.GetKey(keyID)
+		privKey, alias, err := oldKeyStore.GetKey(relKeyPath)
 		if err != nil {
 			return err
 		}
 
-		err = newKeyStore.AddKey(keyInfo, privKey)
+		err = newKeyStore.AddKey(relKeyPath, alias, privKey)
 		if err != nil {
 			return err
 		}
@@ -240,13 +260,13 @@ func moveKeysByGUN(oldKeyStore, newKeyStore trustmanager.KeyStore, gun string) e
 }
 
 func moveKeys(oldKeyStore, newKeyStore trustmanager.KeyStore) error {
-	for keyID, keyInfo := range oldKeyStore.ListKeys() {
-		privateKey, _, err := oldKeyStore.GetKey(keyID)
+	for f := range oldKeyStore.ListKeys() {
+		privateKey, role, err := oldKeyStore.GetKey(f)
 		if err != nil {
 			return err
 		}
 
-		err = newKeyStore.AddKey(keyInfo, privateKey)
+		err = newKeyStore.AddKey(f, role, privateKey)
 
 		if err != nil {
 			return err
@@ -297,9 +317,9 @@ func addKeysToArchive(zipWriter *zip.Writer, newKeyStore *trustmanager.KeyFileSt
 	return nil
 }
 
-// CheckRootKeyIsEncrypted makes sure the root key is encrypted. We have
+// checkRootKeyIsEncrypted makes sure the root key is encrypted. We have
 // internal assumptions that depend on this.
-func CheckRootKeyIsEncrypted(pemBytes []byte) error {
+func checkRootKeyIsEncrypted(pemBytes []byte) error {
 	block, _ := pem.Decode(pemBytes)
 	if block == nil {
 		return ErrNoValidPrivateKey

@@ -2,11 +2,10 @@ package data
 
 import (
 	"bytes"
-	"fmt"
+	"time"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/docker/go/canonical/json"
-	"github.com/docker/notary"
 )
 
 // SignedSnapshot is a fully unpacked snapshot.json
@@ -18,45 +17,10 @@ type SignedSnapshot struct {
 
 // Snapshot is the Signed component of a snapshot.json
 type Snapshot struct {
-	SignedCommon
-	Meta Files `json:"meta"`
-}
-
-// IsValidSnapshotStructure returns an error, or nil, depending on whether the content of the
-// struct is valid for snapshot metadata.  This does not check signatures or expiry, just that
-// the metadata content is valid.
-func IsValidSnapshotStructure(s Snapshot) error {
-	expectedType := TUFTypes[CanonicalSnapshotRole]
-	if s.Type != expectedType {
-		return ErrInvalidMetadata{
-			role: CanonicalSnapshotRole, msg: fmt.Sprintf("expected type %s, not %s", expectedType, s.Type)}
-	}
-
-	if s.Version < 1 {
-		return ErrInvalidMetadata{
-			role: CanonicalSnapshotRole, msg: "version cannot be less than one"}
-	}
-
-	for _, role := range []string{CanonicalRootRole, CanonicalTargetsRole} {
-		// Meta is a map of FileMeta, so if the role isn't in the map it returns
-		// an empty FileMeta, which has an empty map, and you can check on keys
-		// from an empty map.
-		//
-		// For now sha256 is required and sha512 is not.
-		if _, ok := s.Meta[role].Hashes[notary.SHA256]; !ok {
-			return ErrInvalidMetadata{
-				role: CanonicalSnapshotRole,
-				msg:  fmt.Sprintf("missing %s sha256 checksum information", role),
-			}
-		}
-		if err := CheckValidHashStructures(s.Meta[role].Hashes); err != nil {
-			return ErrInvalidMetadata{
-				role: CanonicalSnapshotRole,
-				msg:  fmt.Sprintf("invalid %s checksum information, %v", role, err),
-			}
-		}
-	}
-	return nil
+	Type    string    `json:"_type"`
+	Version int       `json:"version"`
+	Expires time.Time `json:"expires"`
+	Meta    Files     `json:"meta"`
 }
 
 // NewSnapshot initilizes a SignedSnapshot with a given top level root
@@ -73,22 +37,20 @@ func NewSnapshot(root *Signed, targets *Signed) (*SignedSnapshot, error) {
 		logrus.Debug("Error Marshalling Root")
 		return nil, err
 	}
-	rootMeta, err := NewFileMeta(bytes.NewReader(rootJSON), NotaryDefaultHashes...)
+	rootMeta, err := NewFileMeta(bytes.NewReader(rootJSON), "sha256")
 	if err != nil {
 		return nil, err
 	}
-	targetsMeta, err := NewFileMeta(bytes.NewReader(targetsJSON), NotaryDefaultHashes...)
+	targetsMeta, err := NewFileMeta(bytes.NewReader(targetsJSON), "sha256")
 	if err != nil {
 		return nil, err
 	}
 	return &SignedSnapshot{
 		Signatures: make([]Signature, 0),
 		Signed: Snapshot{
-			SignedCommon: SignedCommon{
-				Type:    TUFTypes[CanonicalSnapshotRole],
-				Version: 0,
-				Expires: DefaultExpires(CanonicalSnapshotRole),
-			},
+			Type:    TUFTypes["snapshot"],
+			Version: 0,
+			Expires: DefaultExpires("snapshot"),
 			Meta: Files{
 				CanonicalRootRole:    rootMeta,
 				CanonicalTargetsRole: targetsMeta,
@@ -97,9 +59,13 @@ func NewSnapshot(root *Signed, targets *Signed) (*SignedSnapshot, error) {
 	}, nil
 }
 
+func (sp *SignedSnapshot) hashForRole(role string) []byte {
+	return sp.Signed.Meta[role].Hashes["sha256"]
+}
+
 // ToSigned partially serializes a SignedSnapshot for further signing
-func (sp *SignedSnapshot) ToSigned() (*Signed, error) {
-	s, err := defaultSerializer.MarshalCanonical(sp.Signed)
+func (sp SignedSnapshot) ToSigned() (*Signed, error) {
+	s, err := json.MarshalCanonical(sp.Signed)
 	if err != nil {
 		return nil, err
 	}
@@ -112,7 +78,7 @@ func (sp *SignedSnapshot) ToSigned() (*Signed, error) {
 	copy(sigs, sp.Signatures)
 	return &Signed{
 		Signatures: sigs,
-		Signed:     &signed,
+		Signed:     signed,
 	}, nil
 }
 
@@ -120,17 +86,6 @@ func (sp *SignedSnapshot) ToSigned() (*Signed, error) {
 func (sp *SignedSnapshot) AddMeta(role string, meta FileMeta) {
 	sp.Signed.Meta[role] = meta
 	sp.Dirty = true
-}
-
-// GetMeta gets the metadata for a particular role, returning an error if it's
-// not found
-func (sp *SignedSnapshot) GetMeta(role string) (*FileMeta, error) {
-	if meta, ok := sp.Signed.Meta[role]; ok {
-		if _, ok := meta.Hashes["sha256"]; ok {
-			return &meta, nil
-		}
-	}
-	return nil, ErrMissingMeta{Role: role}
 }
 
 // DeleteMeta removes a role from the snapshot. If the role doesn't
@@ -142,22 +97,11 @@ func (sp *SignedSnapshot) DeleteMeta(role string) {
 	}
 }
 
-// MarshalJSON returns the serialized form of SignedSnapshot as bytes
-func (sp *SignedSnapshot) MarshalJSON() ([]byte, error) {
-	signed, err := sp.ToSigned()
-	if err != nil {
-		return nil, err
-	}
-	return defaultSerializer.Marshal(signed)
-}
-
 // SnapshotFromSigned fully unpacks a Signed object into a SignedSnapshot
 func SnapshotFromSigned(s *Signed) (*SignedSnapshot, error) {
 	sp := Snapshot{}
-	if err := defaultSerializer.Unmarshal(*s.Signed, &sp); err != nil {
-		return nil, err
-	}
-	if err := IsValidSnapshotStructure(sp); err != nil {
+	err := json.Unmarshal(s.Signed, &sp)
+	if err != nil {
 		return nil, err
 	}
 	sigs := make([]Signature, len(s.Signatures))

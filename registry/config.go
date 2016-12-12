@@ -13,23 +13,13 @@ import (
 	registrytypes "github.com/docker/engine-api/types/registry"
 )
 
-// ServiceOptions holds command line options.
-type ServiceOptions struct {
-	Mirrors            []string `json:"registry-mirrors,omitempty"`
-	InsecureRegistries []string `json:"insecure-registries,omitempty"`
-
-	// V2Only controls access to legacy registries.  If it is set to true via the
-	// command line flag the daemon will not attempt to contact v1 legacy registries
-	V2Only bool `json:"disable-legacy-registry,omitempty"`
+// Options holds command line options.
+type Options struct {
+	Mirrors            opts.ListOpts
+	InsecureRegistries opts.ListOpts
 }
 
-// serviceConfig holds daemon configuration for the registry service.
-type serviceConfig struct {
-	registrytypes.ServiceConfig
-	V2Only bool
-}
-
-var (
+const (
 	// DefaultNamespace is the default namespace
 	DefaultNamespace = "docker.io"
 	// DefaultRegistryVersionHeader is the name of the default HTTP header
@@ -37,24 +27,14 @@ var (
 	DefaultRegistryVersionHeader = "Docker-Distribution-Api-Version"
 
 	// IndexServer is the v1 registry server used for user auth + account creation
-	IndexServer = DefaultV1Registry.String() + "/v1/"
+	IndexServer = DefaultV1Registry + "/v1/"
 	// IndexName is the name of the index
 	IndexName = "docker.io"
 
 	// NotaryServer is the endpoint serving the Notary trust server
 	NotaryServer = "https://notary.docker.io"
 
-	// DefaultV1Registry is the URI of the default v1 registry
-	DefaultV1Registry = &url.URL{
-		Scheme: "https",
-		Host:   "index.docker.io",
-	}
-
-	// DefaultV2Registry is the URI of the default v2 registry
-	DefaultV2Registry = &url.URL{
-		Scheme: "https",
-		Host:   "registry-1.docker.io",
-	}
+	// IndexServer = "https://registry-stage.hub.docker.com/v1/"
 )
 
 var (
@@ -62,45 +42,48 @@ var (
 	// not have the correct form
 	ErrInvalidRepositoryName = errors.New("Invalid repository name (ex: \"registry.domain.tld/myrepos\")")
 
-	emptyServiceConfig = newServiceConfig(ServiceOptions{})
+	emptyServiceConfig = NewServiceConfig(nil)
+
+	// V2Only controls access to legacy registries.  If it is set to true via the
+	// command line flag the daemon will not attempt to contact v1 legacy registries
+	V2Only = false
 )
 
-// for mocking in unit tests
-var lookupIP = net.LookupIP
-
-// InstallCliFlags adds command-line options to the top-level flag parser for
+// InstallFlags adds command-line options to the top-level flag parser for
 // the current process.
-func (options *ServiceOptions) InstallCliFlags(cmd *flag.FlagSet, usageFn func(string) string) {
-	mirrors := opts.NewNamedListOptsRef("registry-mirrors", &options.Mirrors, ValidateMirror)
-	cmd.Var(mirrors, []string{"-registry-mirror"}, usageFn("Preferred Docker registry mirror"))
-
-	insecureRegistries := opts.NewNamedListOptsRef("insecure-registries", &options.InsecureRegistries, ValidateIndexName)
-	cmd.Var(insecureRegistries, []string{"-insecure-registry"}, usageFn("Enable insecure registry communication"))
-
-	cmd.BoolVar(&options.V2Only, []string{"-disable-legacy-registry"}, false, usageFn("Disable contacting legacy registries"))
+func (options *Options) InstallFlags(cmd *flag.FlagSet, usageFn func(string) string) {
+	options.Mirrors = opts.NewListOpts(ValidateMirror)
+	cmd.Var(&options.Mirrors, []string{"-registry-mirror"}, usageFn("Preferred Docker registry mirror"))
+	options.InsecureRegistries = opts.NewListOpts(ValidateIndexName)
+	cmd.Var(&options.InsecureRegistries, []string{"-insecure-registry"}, usageFn("Enable insecure registry communication"))
+	cmd.BoolVar(&V2Only, []string{"-disable-legacy-registry"}, false, usageFn("Do not contact legacy registries"))
 }
 
-// newServiceConfig returns a new instance of ServiceConfig
-func newServiceConfig(options ServiceOptions) *serviceConfig {
+// NewServiceConfig returns a new instance of ServiceConfig
+func NewServiceConfig(options *Options) *registrytypes.ServiceConfig {
+	if options == nil {
+		options = &Options{
+			Mirrors:            opts.NewListOpts(nil),
+			InsecureRegistries: opts.NewListOpts(nil),
+		}
+	}
+
 	// Localhost is by default considered as an insecure registry
 	// This is a stop-gap for people who are running a private registry on localhost (especially on Boot2docker).
 	//
 	// TODO: should we deprecate this once it is easier for people to set up a TLS registry or change
 	// daemon flags on boot2docker?
-	options.InsecureRegistries = append(options.InsecureRegistries, "127.0.0.0/8")
+	options.InsecureRegistries.Set("127.0.0.0/8")
 
-	config := &serviceConfig{
-		ServiceConfig: registrytypes.ServiceConfig{
-			InsecureRegistryCIDRs: make([]*registrytypes.NetIPNet, 0),
-			IndexConfigs:          make(map[string]*registrytypes.IndexInfo, 0),
-			// Hack: Bypass setting the mirrors to IndexConfigs since they are going away
-			// and Mirrors are only for the official registry anyways.
-			Mirrors: options.Mirrors,
-		},
-		V2Only: options.V2Only,
+	config := &registrytypes.ServiceConfig{
+		InsecureRegistryCIDRs: make([]*registrytypes.NetIPNet, 0),
+		IndexConfigs:          make(map[string]*registrytypes.IndexInfo, 0),
+		// Hack: Bypass setting the mirrors to IndexConfigs since they are going away
+		// and Mirrors are only for the official registry anyways.
+		Mirrors: options.Mirrors.GetAll(),
 	}
 	// Split --insecure-registry into CIDR and registry-specific settings.
-	for _, r := range options.InsecureRegistries {
+	for _, r := range options.InsecureRegistries.GetAll() {
 		// Check if CIDR was passed to --insecure-registry
 		_, ipnet, err := net.ParseCIDR(r)
 		if err == nil {
@@ -139,7 +122,7 @@ func newServiceConfig(options ServiceOptions) *serviceConfig {
 // or an IP address. If it is a domain name, then it will be resolved in order to check if the IP is contained
 // in a subnet. If the resolving is not successful, isSecureIndex will only try to match hostname to any element
 // of insecureRegistries.
-func isSecureIndex(config *serviceConfig, indexName string) bool {
+func isSecureIndex(config *registrytypes.ServiceConfig, indexName string) bool {
 	// Check for configured index, first.  This is needed in case isSecureIndex
 	// is called from anything besides newIndexInfo, in order to honor per-index configurations.
 	if index, ok := config.IndexConfigs[indexName]; ok {
@@ -206,7 +189,7 @@ func ValidateIndexName(val string) (string, error) {
 	return val, nil
 }
 
-func validateNoScheme(reposName string) error {
+func validateNoSchema(reposName string) error {
 	if strings.Contains(reposName, "://") {
 		// It cannot contain a scheme!
 		return ErrInvalidRepositoryName
@@ -215,7 +198,7 @@ func validateNoScheme(reposName string) error {
 }
 
 // newIndexInfo returns IndexInfo configuration from indexName
-func newIndexInfo(config *serviceConfig, indexName string) (*registrytypes.IndexInfo, error) {
+func newIndexInfo(config *registrytypes.ServiceConfig, indexName string) (*registrytypes.IndexInfo, error) {
 	var err error
 	indexName, err = ValidateIndexName(indexName)
 	if err != nil {
@@ -247,7 +230,7 @@ func GetAuthConfigKey(index *registrytypes.IndexInfo) string {
 }
 
 // newRepositoryInfo validates and breaks down a repository name into a RepositoryInfo
-func newRepositoryInfo(config *serviceConfig, name reference.Named) (*RepositoryInfo, error) {
+func newRepositoryInfo(config *registrytypes.ServiceConfig, name reference.Named) (*RepositoryInfo, error) {
 	index, err := newIndexInfo(config, name.Hostname())
 	if err != nil {
 		return nil, err

@@ -14,16 +14,15 @@ type SysInfo struct {
 	cgroupCPUInfo
 	cgroupBlkioInfo
 	cgroupCpusetInfo
-	cgroupPids
 
 	// Whether IPv4 forwarding is supported or not, if this was disabled, networking will not work
 	IPv4ForwardingDisabled bool
 
 	// Whether bridge-nf-call-iptables is supported or not
-	BridgeNFCallIPTablesDisabled bool
+	BridgeNfCallIptablesDisabled bool
 
 	// Whether bridge-nf-call-ip6tables is supported or not
-	BridgeNFCallIP6TablesDisabled bool
+	BridgeNfCallIP6tablesDisabled bool
 
 	// Whether the cgroup has the mountpoint of "devices" or not
 	CgroupDevicesEnabled bool
@@ -89,11 +88,6 @@ type cgroupCpusetInfo struct {
 
 	// Available Cpuset's memory nodes
 	Mems string
-}
-
-type cgroupPids struct {
-	// Whether Pids Limit is supported or not
-	PidsLimit bool
 }
 
 // IsCpusetCpusAvailable returns `true` if the provided string set is contained

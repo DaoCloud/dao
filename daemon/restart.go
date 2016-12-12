@@ -1,9 +1,8 @@
 package daemon
 
 import (
-	"fmt"
-
 	"github.com/docker/docker/container"
+	derr "github.com/docker/docker/errors"
 )
 
 // ContainerRestart stops and starts a container. It attempts to
@@ -18,7 +17,7 @@ func (daemon *Daemon) ContainerRestart(name string, seconds int) error {
 		return err
 	}
 	if err := daemon.containerRestart(container, seconds); err != nil {
-		return fmt.Errorf("Cannot restart container %s: %v", name, err)
+		return derr.ErrorCodeCantRestart.WithArgs(name, err)
 	}
 	return nil
 }
