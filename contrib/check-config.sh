@@ -115,17 +115,6 @@ check_device() {
 	fi
 }
 
-check_distro_userns() {
-	source /etc/os-release 2>/dev/null || /bin/true
-	if [[ "${ID}" =~ ^(centos|rhel)$ && "${VERSION_ID}" =~ ^7 ]]; then
-		# this is a CentOS7 or RHEL7 system
-		grep -q "user_namespace.enable=1" /proc/cmdline || {
-			# no user namespace support enabled
-			wrap_bad "  (RHEL7/CentOS7" "User namespaces disabled; add 'user_namespace.enable=1' to boot command line)"
-		}
-	fi
-}
-
 if [ ! -e "$CONFIG" ]; then
 	wrap_warning "warning: $CONFIG does not exist, searching other paths for kernel config ..."
 	for tryConfig in "${possibleConfigs[@]}"; do
@@ -182,10 +171,9 @@ flags=(
 	NAMESPACES {NET,PID,IPC,UTS}_NS
 	DEVPTS_MULTIPLE_INSTANCES
 	CGROUPS CGROUP_CPUACCT CGROUP_DEVICE CGROUP_FREEZER CGROUP_SCHED CPUSETS MEMCG
-	KEYS
-	VETH BRIDGE BRIDGE_NETFILTER
+	MACVLAN VETH BRIDGE BRIDGE_NETFILTER
 	NF_NAT_IPV4 IP_NF_FILTER IP_NF_TARGET_MASQUERADE
-	NETFILTER_XT_MATCH_{ADDRTYPE,CONNTRACK,IPVS}
+	NETFILTER_XT_MATCH_{ADDRTYPE,CONNTRACK}
 	NF_NAT NF_NAT_NEEDED
 
 	# required for bind-mounting /dev/mqueue into containers
@@ -197,24 +185,16 @@ echo
 echo 'Optional Features:'
 {
 	check_flags USER_NS
-	check_distro_userns
 }
 {
 	check_flags SECCOMP
 }
 {
-	check_flags CGROUP_PIDS
-}
-{
-	check_flags MEMCG_SWAP MEMCG_SWAP_ENABLED
+	check_flags MEMCG_KMEM MEMCG_SWAP MEMCG_SWAP_ENABLED
 	if  is_set MEMCG_SWAP && ! is_set MEMCG_SWAP_ENABLED; then
 		echo "    $(wrap_color '(note that cgroup swap accounting is not enabled in your kernel config, you can enable it by setting boot option "swapaccount=1")' bold black)"
 	fi
 }
-
-if [ "$kernelMajor" -lt 4 ] || [ "$kernelMajor" -eq 4 -a "$kernelMinor" -le 5 ]; then
-	check_flags MEMCG_KMEM
-fi
 
 if [ "$kernelMajor" -lt 3 ] || [ "$kernelMajor" -eq 3 -a "$kernelMinor" -le 18 ]; then
 	check_flags RESOURCE_COUNTERS
@@ -227,14 +207,11 @@ else
 fi
 
 flags=(
-	BLK_CGROUP BLK_DEV_THROTTLING IOSCHED_CFQ CFQ_GROUP_IOSCHED
+	BLK_CGROUP IOSCHED_CFQ BLK_DEV_THROTTLING
 	CGROUP_PERF
 	CGROUP_HUGETLB
 	NET_CLS_CGROUP $netprio
 	CFS_BANDWIDTH FAIR_GROUP_SCHED RT_GROUP_SCHED
-	IP_VS
-	IP_VS_NFCT
- 	IP_VS_RR
 )
 check_flags "${flags[@]}"
 
@@ -247,18 +224,6 @@ check_flags EXT4_FS EXT4_FS_POSIX_ACL EXT4_FS_SECURITY
 if ! is_set EXT4_FS || ! is_set EXT4_FS_POSIX_ACL || ! is_set EXT4_FS_SECURITY; then
 	echo "    $(wrap_color 'enable these ext4 configs if you are using ext4 as backing filesystem' bold black)"
 fi
-
-echo '- Network Drivers:'
-{
-	echo '- "'$(wrap_color 'overlay' blue)'":'
-	check_flags VXLAN | sed 's/^/  /'
-	echo '  Optional (for secure networks):'
-	check_flags XFRM_ALGO XFRM_USER | sed 's/^/  /'
-	echo '- "'$(wrap_color 'ipvlan' blue)'":'
-	check_flags IPVLAN | sed 's/^/  /'
-	echo '- "'$(wrap_color 'macvlan' blue)'":'
-	check_flags MACVLAN DUMMY | sed 's/^/  /'
-} | sed 's/^/  /'
 
 echo '- Storage Drivers:'
 {
@@ -284,16 +249,3 @@ echo '- Storage Drivers:'
 } | sed 's/^/  /'
 echo
 
-check_limit_over()
-{
-	if [ $(cat "$1") -le "$2" ]; then
-		wrap_bad "- $1" "$(cat $1)"
-		wrap_color "    This should be set to at least $2, for example set: sysctl -w kernel/keys/root_maxkeys=1000000" bold black
-	else
-		wrap_good "- $1" "$(cat $1)"
-	fi
-}
-
-echo 'Limits:'
-check_limit_over /proc/sys/kernel/keys/root_maxkeys 10000
-echo

@@ -5,6 +5,8 @@ import (
 	"strconv"
 
 	"github.com/docker/libnetwork/drivers/bridge"
+	"github.com/docker/libnetwork/netlabel"
+	"github.com/docker/libnetwork/options"
 )
 
 func (c *controller) createGWNetwork() (Network, error) {
@@ -14,10 +16,11 @@ func (c *controller) createGWNetwork() (Network, error) {
 		bridge.EnableIPMasquerade: strconv.FormatBool(true),
 	}
 
-	n, err := c.NewNetwork("bridge", libnGWNetwork, "",
-		NetworkOptionDriverOpts(netOption),
-		NetworkOptionEnableIPv6(false),
-	)
+	n, err := c.NewNetwork("bridge", libnGWNetwork,
+		NetworkOptionGeneric(options.Generic{
+			netlabel.GenericData: netOption,
+			netlabel.EnableIPv6:  false,
+		}))
 
 	if err != nil {
 		return nil, fmt.Errorf("error creating external connectivity network: %v", err)

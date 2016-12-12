@@ -55,63 +55,33 @@ type Manifest struct {
 // Plugin is the definition of a docker plugin.
 type Plugin struct {
 	// Name of the plugin
-	name string
+	Name string `json:"-"`
 	// Address of the plugin
 	Addr string
 	// TLS configuration of the plugin
-	TLSConfig *tlsconfig.Options
+	TLSConfig tlsconfig.Options
 	// Client attached to the plugin
-	client *Client
+	Client *Client `json:"-"`
 	// Manifest of the plugin (see above)
 	Manifest *Manifest `json:"-"`
 
-	// error produced by activation
-	activateErr error
-	// specifies if the activation sequence is completed (not if it is successful or not)
-	activated bool
-	// wait for activation to finish
-	activateWait *sync.Cond
+	activatErr   error
+	activateOnce sync.Once
 }
 
-// Name returns the name of the plugin.
-func (p *Plugin) Name() string {
-	return p.name
-}
-
-// Client returns a ready-to-use plugin client that can be used to communicate with the plugin.
-func (p *Plugin) Client() *Client {
-	return p.client
-}
-
-// IsLegacy returns true for legacy plugins and false otherwise.
-func (p *Plugin) IsLegacy() bool {
-	return true
-}
-
-// NewLocalPlugin creates a new local plugin.
-func NewLocalPlugin(name, addr string) *Plugin {
+func newLocalPlugin(name, addr string) *Plugin {
 	return &Plugin{
-		name: name,
-		Addr: addr,
-		// TODO: change to nil
-		TLSConfig:    &tlsconfig.Options{InsecureSkipVerify: true},
-		activateWait: sync.NewCond(&sync.Mutex{}),
+		Name:      name,
+		Addr:      addr,
+		TLSConfig: tlsconfig.Options{InsecureSkipVerify: true},
 	}
 }
 
 func (p *Plugin) activate() error {
-	p.activateWait.L.Lock()
-	if p.activated {
-		p.activateWait.L.Unlock()
-		return p.activateErr
-	}
-
-	p.activateErr = p.activateWithLock()
-	p.activated = true
-
-	p.activateWait.L.Unlock()
-	p.activateWait.Broadcast()
-	return p.activateErr
+	p.activateOnce.Do(func() {
+		p.activatErr = p.activateWithLock()
+	})
+	return p.activatErr
 }
 
 func (p *Plugin) activateWithLock() error {
@@ -119,10 +89,10 @@ func (p *Plugin) activateWithLock() error {
 	if err != nil {
 		return err
 	}
-	p.client = c
+	p.Client = c
 
 	m := new(Manifest)
-	if err = p.client.Call("Plugin.Activate", nil, m); err != nil {
+	if err = p.Client.Call("Plugin.Activate", nil, m); err != nil {
 		return err
 	}
 
@@ -133,24 +103,12 @@ func (p *Plugin) activateWithLock() error {
 		if !handled {
 			continue
 		}
-		handler(p.name, p.client)
+		handler(p.Name, p.Client)
 	}
 	return nil
 }
 
-func (p *Plugin) waitActive() error {
-	p.activateWait.L.Lock()
-	for !p.activated {
-		p.activateWait.Wait()
-	}
-	p.activateWait.L.Unlock()
-	return p.activateErr
-}
-
 func (p *Plugin) implements(kind string) bool {
-	if err := p.waitActive(); err != nil {
-		return false
-	}
 	for _, driver := range p.Manifest.Implements {
 		if driver == kind {
 			return true
@@ -241,29 +199,19 @@ func GetAll(imp string) ([]*Plugin, error) {
 		err error
 	}
 
-	chPl := make(chan *plLoad, len(pluginNames))
-	var wg sync.WaitGroup
+	chPl := make(chan plLoad, len(pluginNames))
 	for _, name := range pluginNames {
-		if pl, ok := storage.plugins[name]; ok {
-			chPl <- &plLoad{pl, nil}
-			continue
-		}
-
-		wg.Add(1)
 		go func(name string) {
-			defer wg.Done()
 			pl, err := loadWithRetry(name, false)
-			chPl <- &plLoad{pl, err}
+			chPl <- plLoad{pl, err}
 		}(name)
 	}
 
-	wg.Wait()
-	close(chPl)
-
 	var out []*Plugin
-	for pl := range chPl {
+	for i := 0; i < len(pluginNames); i++ {
+		pl := <-chPl
 		if pl.err != nil {
-			logrus.Error(pl.err)
+			logrus.Error(err)
 			continue
 		}
 		if pl.pl.implements(imp) {

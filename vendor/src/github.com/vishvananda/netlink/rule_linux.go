@@ -11,26 +11,14 @@ import (
 // RuleAdd adds a rule to the system.
 // Equivalent to: ip rule add
 func RuleAdd(rule *Rule) error {
-	return pkgHandle.RuleAdd(rule)
-}
-
-// RuleAdd adds a rule to the system.
-// Equivalent to: ip rule add
-func (h *Handle) RuleAdd(rule *Rule) error {
-	req := h.newNetlinkRequest(syscall.RTM_NEWRULE, syscall.NLM_F_CREATE|syscall.NLM_F_EXCL|syscall.NLM_F_ACK)
+	req := nl.NewNetlinkRequest(syscall.RTM_NEWRULE, syscall.NLM_F_CREATE|syscall.NLM_F_EXCL|syscall.NLM_F_ACK)
 	return ruleHandle(rule, req)
 }
 
 // RuleDel deletes a rule from the system.
 // Equivalent to: ip rule del
 func RuleDel(rule *Rule) error {
-	return pkgHandle.RuleDel(rule)
-}
-
-// RuleDel deletes a rule from the system.
-// Equivalent to: ip rule del
-func (h *Handle) RuleDel(rule *Rule) error {
-	req := h.newNetlinkRequest(syscall.RTM_DELRULE, syscall.NLM_F_CREATE|syscall.NLM_F_EXCL|syscall.NLM_F_ACK)
+	req := nl.NewNetlinkRequest(syscall.RTM_DELRULE, syscall.NLM_F_CREATE|syscall.NLM_F_EXCL|syscall.NLM_F_ACK)
 	return ruleHandle(rule, req)
 }
 
@@ -140,13 +128,7 @@ func ruleHandle(rule *Rule, req *nl.NetlinkRequest) error {
 // RuleList lists rules in the system.
 // Equivalent to: ip rule list
 func RuleList(family int) ([]Rule, error) {
-	return pkgHandle.RuleList(family)
-}
-
-// RuleList lists rules in the system.
-// Equivalent to: ip rule list
-func (h *Handle) RuleList(family int) ([]Rule, error) {
-	req := h.newNetlinkRequest(syscall.RTM_GETRULE, syscall.NLM_F_DUMP|syscall.NLM_F_REQUEST)
+	req := nl.NewNetlinkRequest(syscall.RTM_GETRULE, syscall.NLM_F_DUMP|syscall.NLM_F_REQUEST)
 	msg := nl.NewIfInfomsg(family)
 	req.AddData(msg)
 
@@ -165,6 +147,7 @@ func (h *Handle) RuleList(family int) ([]Rule, error) {
 		}
 
 		rule := NewRule()
+		rule.RtMsg = msg
 
 		for j := range attrs {
 			switch attrs[j].Attr.Type {

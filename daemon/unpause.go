@@ -1,9 +1,8 @@
 package daemon
 
 import (
-	"fmt"
-
 	"github.com/docker/docker/container"
+	derr "github.com/docker/docker/errors"
 )
 
 // ContainerUnpause unpauses a container
@@ -14,7 +13,7 @@ func (daemon *Daemon) ContainerUnpause(name string) error {
 	}
 
 	if err := daemon.containerUnpause(container); err != nil {
-		return err
+		return derr.ErrorCodeCantUnpause.WithArgs(name, err)
 	}
 
 	return nil
@@ -27,17 +26,19 @@ func (daemon *Daemon) containerUnpause(container *container.Container) error {
 
 	// We cannot unpause the container which is not running
 	if !container.Running {
-		return errNotRunning{container.ID}
+		return derr.ErrorCodeNotRunning.WithArgs(container.ID)
 	}
 
 	// We cannot unpause the container which is not paused
 	if !container.Paused {
-		return fmt.Errorf("Container %s is not paused", container.ID)
+		return derr.ErrorCodeNotPaused.WithArgs(container.ID)
 	}
 
-	if err := daemon.containerd.Resume(container.ID); err != nil {
-		return fmt.Errorf("Cannot unpause container %s: %s", container.ID, err)
+	if err := daemon.execDriver.Unpause(container.Command); err != nil {
+		return err
 	}
 
+	container.Paused = false
+	daemon.LogContainerEvent(container, "unpause")
 	return nil
 }

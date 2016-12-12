@@ -8,7 +8,6 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -152,10 +151,6 @@ func compareFiles(src string, dest string) error {
 }
 
 func TestChrootTarUntarWithSymlink(t *testing.T) {
-	// TODO Windows: Figure out why this is failing
-	if runtime.GOOS == "windows" {
-		t.Skip("Failing on Windows")
-	}
 	tmpdir, err := ioutil.TempDir("", "docker-TestChrootTarUntarWithSymlink")
 	if err != nil {
 		t.Fatal(err)
@@ -178,10 +173,6 @@ func TestChrootTarUntarWithSymlink(t *testing.T) {
 }
 
 func TestChrootCopyWithTar(t *testing.T) {
-	// TODO Windows: Figure out why this is failing
-	if runtime.GOOS == "windows" {
-		t.Skip("Failing on Windows")
-	}
 	tmpdir, err := ioutil.TempDir("", "docker-TestChrootCopyWithTar")
 	if err != nil {
 		t.Fatal(err)
@@ -271,10 +262,6 @@ func TestChrootCopyFileWithTar(t *testing.T) {
 }
 
 func TestChrootUntarPath(t *testing.T) {
-	// TODO Windows: Figure out why this is failing
-	if runtime.GOOS == "windows" {
-		t.Skip("Failing on Windows")
-	}
 	tmpdir, err := ioutil.TempDir("", "docker-TestChrootUntarPath")
 	if err != nil {
 		t.Fatal(err)

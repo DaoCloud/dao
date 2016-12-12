@@ -5,21 +5,14 @@ import (
 	"strings"
 )
 
-// ErrInsufficientSignatures - can not create enough signatures on a piece of
+// ErrInsufficientSignatures - do not have enough signatures on a piece of
 // metadata
 type ErrInsufficientSignatures struct {
-	FoundKeys     int
-	NeededKeys    int
-	MissingKeyIDs []string
+	Name string
 }
 
 func (e ErrInsufficientSignatures) Error() string {
-	candidates := strings.Join(e.MissingKeyIDs, ", ")
-	if e.FoundKeys == 0 {
-		return fmt.Sprintf("signing keys not available, need %d keys out of: %s", e.NeededKeys, candidates)
-	}
-	return fmt.Sprintf("not enough signing keys: got %d of %d needed keys, other candidates: %s",
-		e.FoundKeys, e.NeededKeys, candidates)
+	return fmt.Sprintf("tuf: insufficient signatures: %s", e.Name)
 }
 
 // ErrExpired indicates a piece of metadata has expired
@@ -44,15 +37,10 @@ func (e ErrLowVersion) Error() string {
 }
 
 // ErrRoleThreshold indicates we did not validate enough signatures to meet the threshold
-type ErrRoleThreshold struct {
-	Msg string
-}
+type ErrRoleThreshold struct{}
 
 func (e ErrRoleThreshold) Error() string {
-	if e.Msg == "" {
-		return "valid signatures did not meet threshold"
-	}
-	return e.Msg
+	return "valid signatures did not meet threshold"
 }
 
 // ErrInvalidKeyType indicates the types for the key and signature it's associated with are
@@ -61,13 +49,6 @@ type ErrInvalidKeyType struct{}
 
 func (e ErrInvalidKeyType) Error() string {
 	return "key type is not valid for signature"
-}
-
-// ErrInvalidKeyID indicates the specified key ID was incorrect for its associated data
-type ErrInvalidKeyID struct{}
-
-func (e ErrInvalidKeyID) Error() string {
-	return "key ID is not valid for key content"
 }
 
 // ErrInvalidKeyLength indicates that while we may support the cipher, the provided

@@ -13,7 +13,6 @@ docker-build - Build a new image from the source code at PATH
 [**-f**|**--file**[=*PATH/Dockerfile*]]
 [**--force-rm**]
 [**--isolation**[=*default*]]
-[**--label**[=*[]*]]
 [**--no-cache**]
 [**--pull**]
 [**-q**|**--quiet**]
@@ -72,9 +71,6 @@ set as the **URL**, the repository is cloned locally and then sent as the contex
 **--isolation**="*default*"
    Isolation specifies the type of isolation technology used by containers. 
 
-**--label**=*label*
-   Set metadata for an image
-
 **--no-cache**=*true*|*false*
    Do not use cache when building the image. The default is *false*.
 
@@ -91,9 +87,7 @@ set as the **URL**, the repository is cloned locally and then sent as the contex
    Remove intermediate containers after a successful build. The default is *true*.
 
 **-t**, **--tag**=""
-   Repository names (and optionally with tags) to be applied to the resulting 
-   image in case of success. Refer to **docker-tag(1)** for more information
-   about valid tag names.
+   Repository names (and optionally with tags) to be applied to the resulting image in case of success.
 
 **-m**, **--memory**=*MEMORY*
   Memory limit
@@ -279,7 +273,7 @@ repository.
 
     docker build github.com/scollier/purpletest
 
-Note: You can set an arbitrary Git repository via the `git://` scheme.
+Note: You can set an arbitrary Git repository via the `git://` schema.
 
 ## Building an image using a URL to a tarball'ed context
 

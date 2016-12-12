@@ -90,10 +90,7 @@ func (pm *PortMapper) MapRange(container net.Addr, hostIP net.IP, hostPortStart,
 		}
 
 		if useProxy {
-			m.userlandProxy, err = newProxy(proto, hostIP, allocatedHostPort, container.(*net.TCPAddr).IP, container.(*net.TCPAddr).Port)
-			if err != nil {
-				return nil, err
-			}
+			m.userlandProxy = newProxy(proto, hostIP, allocatedHostPort, container.(*net.TCPAddr).IP, container.(*net.TCPAddr).Port)
 		} else {
 			m.userlandProxy = newDummyProxy(proto, hostIP, allocatedHostPort)
 		}
@@ -110,10 +107,7 @@ func (pm *PortMapper) MapRange(container net.Addr, hostIP net.IP, hostPortStart,
 		}
 
 		if useProxy {
-			m.userlandProxy, err = newProxy(proto, hostIP, allocatedHostPort, container.(*net.UDPAddr).IP, container.(*net.UDPAddr).Port)
-			if err != nil {
-				return nil, err
-			}
+			m.userlandProxy = newProxy(proto, hostIP, allocatedHostPort, container.(*net.UDPAddr).IP, container.(*net.UDPAddr).Port)
 		} else {
 			m.userlandProxy = newDummyProxy(proto, hostIP, allocatedHostPort)
 		}

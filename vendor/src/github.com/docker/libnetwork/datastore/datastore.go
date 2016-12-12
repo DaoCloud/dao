@@ -9,7 +9,10 @@ import (
 
 	"github.com/docker/libkv"
 	"github.com/docker/libkv/store"
-	"github.com/docker/libnetwork/discoverapi"
+	"github.com/docker/libkv/store/boltdb"
+	"github.com/docker/libkv/store/consul"
+	"github.com/docker/libkv/store/etcd"
+	"github.com/docker/libkv/store/zookeeper"
 	"github.com/docker/libnetwork/types"
 )
 
@@ -27,7 +30,7 @@ type DataStore interface {
 	DeleteObjectAtomic(kvObject KVObject) error
 	// DeleteTree deletes a record
 	DeleteTree(kvObject KVObject) error
-	// Watchable returns whether the store is watchable or not
+	// Watchable returns whether the store is watchable are not
 	Watchable() bool
 	// Watch for changes on a KVObject
 	Watch(kvObject KVObject, stopCh <-chan struct{}) (<-chan KVObject, error)
@@ -54,22 +57,21 @@ var (
 )
 
 type datastore struct {
-	scope      string
-	store      store.Store
-	cache      *cache
-	watchCh    chan struct{}
-	active     bool
-	sequential bool
+	scope   string
+	store   store.Store
+	cache   *cache
+	watchCh chan struct{}
+	active  bool
 	sync.Mutex
 }
 
-// KVObject is Key/Value interface used by objects to be part of the DataStore
+// KVObject is  Key/Value interface used by objects to be part of the DataStore
 type KVObject interface {
-	// Key method lets an object provide the Key to be used in KV Store
+	// Key method lets an object to provide the Key to be used in KV Store
 	Key() []string
-	// KeyPrefix method lets an object return immediate parent key that can be used for tree walk
+	// KeyPrefix method lets an object to return immediate parent key that can be used for tree walk
 	KeyPrefix() []string
-	// Value method lets an object marshal its content to be stored in the KV store
+	// Value method lets an object to marshal its content to be stored in the KV store
 	Value() []byte
 	// SetValue is used by the datastore to set the object's value when loaded from the data store.
 	SetValue([]byte) error
@@ -145,6 +147,13 @@ func makeDefaultScopes() map[string]*ScopeCfg {
 var defaultRootChain = []string{"docker", "network", "v1.0"}
 var rootChain = defaultRootChain
 
+func init() {
+	consul.Register()
+	zookeeper.Register()
+	etcd.Register()
+	boltdb.Register()
+}
+
 // DefaultScopes returns a map of default scopes and it's config for clients to use.
 func DefaultScopes(dataDir string) map[string]*ScopeCfg {
 	if dataDir != "" {
@@ -191,10 +200,6 @@ func newClient(scope string, kv string, addr string, config *store.Config, cache
 	if cached && scope != LocalScope {
 		return nil, fmt.Errorf("caching supported only for scope %s", LocalScope)
 	}
-	sequential := false
-	if scope == LocalScope {
-		sequential = true
-	}
 
 	if config == nil {
 		config = &store.Config{}
@@ -221,7 +226,7 @@ func newClient(scope string, kv string, addr string, config *store.Config, cache
 		return nil, err
 	}
 
-	ds := &datastore{scope: scope, store: store, active: true, watchCh: make(chan struct{}), sequential: sequential}
+	ds := &datastore{scope: scope, store: store, active: true, watchCh: make(chan struct{})}
 	if cached {
 		ds.cache = newCache(ds)
 	}
@@ -246,34 +251,6 @@ func NewDataStore(scope string, cfg *ScopeCfg) (DataStore, error) {
 	}
 
 	return newClient(scope, cfg.Client.Provider, cfg.Client.Address, cfg.Client.Config, cached)
-}
-
-// NewDataStoreFromConfig creates a new instance of LibKV data store starting from the datastore config data
-func NewDataStoreFromConfig(dsc discoverapi.DatastoreConfigData) (DataStore, error) {
-	var (
-		ok    bool
-		sCfgP *store.Config
-	)
-
-	sCfgP, ok = dsc.Config.(*store.Config)
-	if !ok && dsc.Config != nil {
-		return nil, fmt.Errorf("cannot parse store configuration: %v", dsc.Config)
-	}
-
-	scopeCfg := &ScopeCfg{
-		Client: ScopeClientCfg{
-			Address:  dsc.Address,
-			Provider: dsc.Provider,
-			Config:   sCfgP,
-		},
-	}
-
-	ds, err := NewDataStore(dsc.Scope, scopeCfg)
-	if err != nil {
-		return nil, fmt.Errorf("failed to construct datastore client from datastore configuration %v: %v", dsc, err)
-	}
-
-	return ds, err
 }
 
 func (ds *datastore) Close() {
@@ -380,10 +357,8 @@ func (ds *datastore) PutObjectAtomic(kvObject KVObject) error {
 		pair     *store.KVPair
 		err      error
 	)
-	if ds.sequential {
-		ds.Lock()
-		defer ds.Unlock()
-	}
+	ds.Lock()
+	defer ds.Unlock()
 
 	if kvObject == nil {
 		return types.BadRequestErrorf("invalid KV Object : nil")
@@ -407,9 +382,6 @@ func (ds *datastore) PutObjectAtomic(kvObject KVObject) error {
 
 	_, pair, err = ds.store.AtomicPut(Key(kvObject.Key()...), kvObjValue, previous, nil)
 	if err != nil {
-		if err == store.ErrKeyExists {
-			return ErrKeyModified
-		}
 		return err
 	}
 
@@ -417,9 +389,7 @@ func (ds *datastore) PutObjectAtomic(kvObject KVObject) error {
 
 add_cache:
 	if ds.cache != nil {
-		// If persistent store is skipped, sequencing needs to
-		// happen in cache.
-		return ds.cache.add(kvObject, kvObject.Skip())
+		return ds.cache.add(kvObject)
 	}
 
 	return nil
@@ -427,10 +397,8 @@ add_cache:
 
 // PutObject adds a new Record based on an object into the datastore
 func (ds *datastore) PutObject(kvObject KVObject) error {
-	if ds.sequential {
-		ds.Lock()
-		defer ds.Unlock()
-	}
+	ds.Lock()
+	defer ds.Unlock()
 
 	if kvObject == nil {
 		return types.BadRequestErrorf("invalid KV Object : nil")
@@ -446,9 +414,7 @@ func (ds *datastore) PutObject(kvObject KVObject) error {
 
 add_cache:
 	if ds.cache != nil {
-		// If persistent store is skipped, sequencing needs to
-		// happen in cache.
-		return ds.cache.add(kvObject, kvObject.Skip())
+		return ds.cache.add(kvObject)
 	}
 
 	return nil
@@ -465,10 +431,8 @@ func (ds *datastore) putObjectWithKey(kvObject KVObject, key ...string) error {
 
 // GetObject returns a record matching the key
 func (ds *datastore) GetObject(key string, o KVObject) error {
-	if ds.sequential {
-		ds.Lock()
-		defer ds.Unlock()
-	}
+	ds.Lock()
+	defer ds.Unlock()
 
 	if ds.cache != nil {
 		return ds.cache.get(key, o)
@@ -501,10 +465,8 @@ func (ds *datastore) ensureParent(parent string) error {
 }
 
 func (ds *datastore) List(key string, kvObject KVObject) ([]KVObject, error) {
-	if ds.sequential {
-		ds.Lock()
-		defer ds.Unlock()
-	}
+	ds.Lock()
+	defer ds.Unlock()
 
 	if ds.cache != nil {
 		return ds.cache.list(kvObject)
@@ -549,16 +511,12 @@ func (ds *datastore) List(key string, kvObject KVObject) ([]KVObject, error) {
 
 // DeleteObject unconditionally deletes a record from the store
 func (ds *datastore) DeleteObject(kvObject KVObject) error {
-	if ds.sequential {
-		ds.Lock()
-		defer ds.Unlock()
-	}
+	ds.Lock()
+	defer ds.Unlock()
 
 	// cleaup the cache first
 	if ds.cache != nil {
-		// If persistent store is skipped, sequencing needs to
-		// happen in cache.
-		ds.cache.del(kvObject, kvObject.Skip())
+		ds.cache.del(kvObject)
 	}
 
 	if kvObject.Skip() {
@@ -570,10 +528,8 @@ func (ds *datastore) DeleteObject(kvObject KVObject) error {
 
 // DeleteObjectAtomic performs atomic delete on a record
 func (ds *datastore) DeleteObjectAtomic(kvObject KVObject) error {
-	if ds.sequential {
-		ds.Lock()
-		defer ds.Unlock()
-	}
+	ds.Lock()
+	defer ds.Unlock()
 
 	if kvObject == nil {
 		return types.BadRequestErrorf("invalid KV Object : nil")
@@ -586,18 +542,13 @@ func (ds *datastore) DeleteObjectAtomic(kvObject KVObject) error {
 	}
 
 	if _, err := ds.store.AtomicDelete(Key(kvObject.Key()...), previous); err != nil {
-		if err == store.ErrKeyExists {
-			return ErrKeyModified
-		}
 		return err
 	}
 
 del_cache:
 	// cleanup the cache only if AtomicDelete went through successfully
 	if ds.cache != nil {
-		// If persistent store is skipped, sequencing needs to
-		// happen in cache.
-		return ds.cache.del(kvObject, kvObject.Skip())
+		return ds.cache.del(kvObject)
 	}
 
 	return nil
@@ -605,16 +556,12 @@ del_cache:
 
 // DeleteTree unconditionally deletes a record from the store
 func (ds *datastore) DeleteTree(kvObject KVObject) error {
-	if ds.sequential {
-		ds.Lock()
-		defer ds.Unlock()
-	}
+	ds.Lock()
+	defer ds.Unlock()
 
 	// cleaup the cache first
 	if ds.cache != nil {
-		// If persistent store is skipped, sequencing needs to
-		// happen in cache.
-		ds.cache.del(kvObject, kvObject.Skip())
+		ds.cache.del(kvObject)
 	}
 
 	if kvObject.Skip() {

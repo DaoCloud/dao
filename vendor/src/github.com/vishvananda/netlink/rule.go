@@ -3,10 +3,13 @@ package netlink
 import (
 	"fmt"
 	"net"
+
+	"github.com/vishvananda/netlink/nl"
 )
 
 // Rule represents a netlink rule.
 type Rule struct {
+	*nl.RtMsg
 	Priority          int
 	Table             int
 	Mark              int

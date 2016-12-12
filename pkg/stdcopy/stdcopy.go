@@ -1,28 +1,14 @@
 package stdcopy
 
 import (
-	"bytes"
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"io"
-	"sync"
 
 	"github.com/Sirupsen/logrus"
 )
 
-// StdType is the type of standard stream
-// a writer can multiplex to.
-type StdType byte
-
 const (
-	// Stdin represents standard input stream type.
-	Stdin StdType = iota
-	// Stdout represents standard output stream type.
-	Stdout
-	// Stderr represents standard error steam type.
-	Stderr
-
 	stdWriterPrefixLen = 8
 	stdWriterFdIndex   = 0
 	stdWriterSizeIndex = 4
@@ -30,40 +16,41 @@ const (
 	startingBufLen = 32*1024 + stdWriterPrefixLen + 1
 )
 
-var bufPool = &sync.Pool{New: func() interface{} { return bytes.NewBuffer(nil) }}
+// StdType prefixes type and length to standard stream.
+type StdType [stdWriterPrefixLen]byte
 
-// stdWriter is wrapper of io.Writer with extra customized info.
-type stdWriter struct {
+var (
+	// Stdin represents standard input stream type.
+	Stdin = StdType{0: 0}
+	// Stdout represents standard output stream type.
+	Stdout = StdType{0: 1}
+	// Stderr represents standard error steam type.
+	Stderr = StdType{0: 2}
+)
+
+// StdWriter is wrapper of io.Writer with extra customized info.
+type StdWriter struct {
 	io.Writer
-	prefix byte
+	prefix  StdType
+	sizeBuf []byte
 }
 
-// Write sends the buffer to the underneath writer.
-// It inserts the prefix header before the buffer,
-// so stdcopy.StdCopy knows where to multiplex the output.
-// It makes stdWriter to implement io.Writer.
-func (w *stdWriter) Write(p []byte) (n int, err error) {
+func (w *StdWriter) Write(buf []byte) (n int, err error) {
+	var n1, n2 int
 	if w == nil || w.Writer == nil {
 		return 0, errors.New("Writer not instantiated")
 	}
-	if p == nil {
-		return 0, nil
+	binary.BigEndian.PutUint32(w.prefix[4:], uint32(len(buf)))
+	n1, err = w.Writer.Write(w.prefix[:])
+	if err != nil {
+		n = n1 - stdWriterPrefixLen
+	} else {
+		n2, err = w.Writer.Write(buf)
+		n = n1 + n2 - stdWriterPrefixLen
 	}
-
-	header := [stdWriterPrefixLen]byte{stdWriterFdIndex: w.prefix}
-	binary.BigEndian.PutUint32(header[stdWriterSizeIndex:], uint32(len(p)))
-	buf := bufPool.Get().(*bytes.Buffer)
-	buf.Write(header[:])
-	buf.Write(p)
-
-	n, err = w.Writer.Write(buf.Bytes())
-	n -= stdWriterPrefixLen
 	if n < 0 {
 		n = 0
 	}
-
-	buf.Reset()
-	bufPool.Put(buf)
 	return
 }
 
@@ -73,12 +60,15 @@ func (w *stdWriter) Write(p []byte) (n int, err error) {
 // This allows multiple write streams (e.g. stdout and stderr) to be muxed into a single connection.
 // `t` indicates the id of the stream to encapsulate.
 // It can be stdcopy.Stdin, stdcopy.Stdout, stdcopy.Stderr.
-func NewStdWriter(w io.Writer, t StdType) io.Writer {
-	return &stdWriter{
-		Writer: w,
-		prefix: byte(t),
+func NewStdWriter(w io.Writer, t StdType) *StdWriter {
+	return &StdWriter{
+		Writer:  w,
+		prefix:  t,
+		sizeBuf: make([]byte, 4),
 	}
 }
+
+var errInvalidStdHeader = errors.New("Unrecognized input header")
 
 // StdCopy is a modified version of io.Copy.
 //
@@ -120,18 +110,18 @@ func StdCopy(dstout, dsterr io.Writer, src io.Reader) (written int64, err error)
 		}
 
 		// Check the first byte to know where to write
-		switch StdType(buf[stdWriterFdIndex]) {
-		case Stdin:
+		switch buf[stdWriterFdIndex] {
+		case 0:
 			fallthrough
-		case Stdout:
+		case 1:
 			// Write on stdout
 			out = dstout
-		case Stderr:
+		case 2:
 			// Write on stderr
 			out = dsterr
 		default:
 			logrus.Debugf("Error selecting output fd: (%d)", buf[stdWriterFdIndex])
-			return 0, fmt.Errorf("Unrecognized input header: %d", buf[stdWriterFdIndex])
+			return 0, errInvalidStdHeader
 		}
 
 		// Retrieve the size of the frame

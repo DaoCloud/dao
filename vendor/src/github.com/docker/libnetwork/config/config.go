@@ -8,30 +8,25 @@ import (
 	"github.com/docker/docker/pkg/discovery"
 	"github.com/docker/docker/pkg/tlsconfig"
 	"github.com/docker/libkv/store"
-	"github.com/docker/libnetwork/cluster"
 	"github.com/docker/libnetwork/datastore"
 	"github.com/docker/libnetwork/netlabel"
-	"github.com/docker/libnetwork/osl"
 )
 
 // Config encapsulates configurations of various Libnetwork components
 type Config struct {
-	Daemon          DaemonCfg
-	Cluster         ClusterCfg
-	Scopes          map[string]*datastore.ScopeCfg
-	ActiveSandboxes map[string]interface{}
+	Daemon  DaemonCfg
+	Cluster ClusterCfg
+	Scopes  map[string]*datastore.ScopeCfg
 }
 
 // DaemonCfg represents libnetwork core configuration
 type DaemonCfg struct {
-	Debug           bool
-	DataDir         string
-	DefaultNetwork  string
-	DefaultDriver   string
-	Labels          []string
-	DriverCfg       map[string]interface{}
-	ClusterProvider cluster.Provider
-	DisableProvider chan struct{}
+	Debug          bool
+	DataDir        string
+	DefaultNetwork string
+	DefaultDriver  string
+	Labels         []string
+	DriverCfg      map[string]interface{}
 }
 
 // ClusterCfg represents cluster configuration
@@ -66,24 +61,7 @@ func ParseConfig(tomlCfgFile string) (*Config, error) {
 	return cfg, nil
 }
 
-// ParseConfigOptions parses the configuration options and returns
-// a reference to the corresponding Config structure
-func ParseConfigOptions(cfgOptions ...Option) *Config {
-	cfg := &Config{
-		Daemon: DaemonCfg{
-			DriverCfg:       make(map[string]interface{}),
-			DisableProvider: make(chan struct{}, 10),
-		},
-		Scopes: make(map[string]*datastore.ScopeCfg),
-	}
-
-	cfg.ProcessOptions(cfgOptions...)
-	cfg.LoadDefaultScopes(cfg.Daemon.DataDir)
-
-	return cfg
-}
-
-// Option is an option setter function type used to pass various configurations
+// Option is a option setter function type used to pass varios configurations
 // to the controller
 type Option func(c *Config)
 
@@ -198,13 +176,6 @@ func OptionDataDir(dataDir string) Option {
 	}
 }
 
-// OptionExecRoot function returns an option setter for exec root folder
-func OptionExecRoot(execRoot string) Option {
-	return func(c *Config) {
-		osl.SetBasePath(execRoot)
-	}
-}
-
 // ProcessOptions processes options and stores it in config
 func (c *Config) ProcessOptions(options ...Option) {
 	for _, opt := range options {
@@ -252,13 +223,5 @@ func OptionLocalKVProviderConfig(config *store.Config) Option {
 			c.Scopes[datastore.LocalScope] = &datastore.ScopeCfg{}
 		}
 		c.Scopes[datastore.LocalScope].Client.Config = config
-	}
-}
-
-// OptionActiveSandboxes function returns an option setter for passing the sandboxes
-// which were active during previous daemon life
-func OptionActiveSandboxes(sandboxes map[string]interface{}) Option {
-	return func(c *Config) {
-		c.ActiveSandboxes = sandboxes
 	}
 }

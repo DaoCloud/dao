@@ -6,7 +6,6 @@ package dockerfile
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -14,13 +13,13 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/Sirupsen/logrus"
-	"github.com/docker/docker/api/types/backend"
+	"github.com/docker/docker/api"
 	"github.com/docker/docker/builder"
 	"github.com/docker/docker/builder/dockerfile/parser"
 	"github.com/docker/docker/pkg/archive"
@@ -39,7 +38,7 @@ import (
 	"github.com/docker/engine-api/types/strslice"
 )
 
-func (b *Builder) commit(id string, autoCmd strslice.StrSlice, comment string) error {
+func (b *Builder) commit(id string, autoCmd *strslice.StrSlice, comment string) error {
 	if b.disableCommit {
 		return nil
 	}
@@ -47,11 +46,14 @@ func (b *Builder) commit(id string, autoCmd strslice.StrSlice, comment string) e
 		return fmt.Errorf("Please provide a source image with `from` prior to commit")
 	}
 	b.runConfig.Image = b.image
-
 	if id == "" {
 		cmd := b.runConfig.Cmd
-		b.runConfig.Cmd = strslice.StrSlice(append(getShell(b.runConfig), "#(nop) ", comment))
-		defer func(cmd strslice.StrSlice) { b.runConfig.Cmd = cmd }(cmd)
+		if runtime.GOOS != "windows" {
+			b.runConfig.Cmd = strslice.New("/bin/sh", "-c", "#(nop) "+comment)
+		} else {
+			b.runConfig.Cmd = strslice.New("cmd", "/S /C", "REM (nop) "+comment)
+		}
+		defer func(cmd *strslice.StrSlice) { b.runConfig.Cmd = cmd }(cmd)
 
 		hit, err := b.probeCache()
 		if err != nil {
@@ -69,12 +71,10 @@ func (b *Builder) commit(id string, autoCmd strslice.StrSlice, comment string) e
 	autoConfig := *b.runConfig
 	autoConfig.Cmd = autoCmd
 
-	commitCfg := &backend.ContainerCommitConfig{
-		ContainerCommitConfig: types.ContainerCommitConfig{
-			Author: b.maintainer,
-			Pause:  true,
-			Config: &autoConfig,
-		},
+	commitCfg := &types.ContainerCommitConfig{
+		Author: b.maintainer,
+		Pause:  true,
+		Config: &autoConfig,
 	}
 
 	// Commit the container
@@ -82,7 +82,6 @@ func (b *Builder) commit(id string, autoCmd strslice.StrSlice, comment string) e
 	if err != nil {
 		return err
 	}
-
 	b.image = imageID
 	return nil
 }
@@ -172,8 +171,12 @@ func (b *Builder) runContextCommand(args []string, allowRemote bool, allowLocalD
 	}
 
 	cmd := b.runConfig.Cmd
-	b.runConfig.Cmd = strslice.StrSlice(append(getShell(b.runConfig), fmt.Sprintf("#(nop) %s %s in %s ", cmdName, srcHash, dest)))
-	defer func(cmd strslice.StrSlice) { b.runConfig.Cmd = cmd }(cmd)
+	if runtime.GOOS != "windows" {
+		b.runConfig.Cmd = strslice.New("/bin/sh", "-c", fmt.Sprintf("#(nop) %s %s in %s", cmdName, srcHash, dest))
+	} else {
+		b.runConfig.Cmd = strslice.New("cmd", "/S", "/C", fmt.Sprintf("REM (nop) %s %s in %s", cmdName, srcHash, dest))
+	}
+	defer func(cmd *strslice.StrSlice) { b.runConfig.Cmd = cmd }(cmd)
 
 	if hit, err := b.probeCache(); err != nil {
 		return err
@@ -181,7 +184,7 @@ func (b *Builder) runContextCommand(args []string, allowRemote bool, allowLocalD
 		return nil
 	}
 
-	container, err := b.docker.ContainerCreate(types.ContainerCreateConfig{Config: b.runConfig}, true)
+	container, err := b.docker.ContainerCreate(types.ContainerCreateConfig{Config: b.runConfig})
 	if err != nil {
 		return err
 	}
@@ -191,12 +194,18 @@ func (b *Builder) runContextCommand(args []string, allowRemote bool, allowLocalD
 
 	// Twiddle the destination when its a relative path - meaning, make it
 	// relative to the WORKINGDIR
-	if dest, err = normaliseDest(cmdName, b.runConfig.WorkingDir, dest); err != nil {
-		return err
+	if !system.IsAbs(dest) {
+		hasSlash := strings.HasSuffix(dest, string(os.PathSeparator))
+		dest = filepath.Join(string(os.PathSeparator), filepath.FromSlash(b.runConfig.WorkingDir), dest)
+
+		// Make sure we preserve any trailing slash
+		if hasSlash {
+			dest += string(os.PathSeparator)
+		}
 	}
 
 	for _, info := range infos {
-		if err := b.docker.CopyOnBuild(container.ID, dest, info.FileInfo, info.decompress); err != nil {
+		if err := b.docker.BuilderCopy(container.ID, dest, info.FileInfo, info.decompress); err != nil {
 			return err
 		}
 	}
@@ -387,10 +396,10 @@ func containsWildcards(name string) bool {
 
 func (b *Builder) processImageFrom(img builder.Image) error {
 	if img != nil {
-		b.image = img.ImageID()
+		b.image = img.ID()
 
-		if img.RunConfig() != nil {
-			b.runConfig = img.RunConfig()
+		if img.Config() != nil {
+			b.runConfig = img.Config()
 		}
 	}
 
@@ -421,13 +430,13 @@ func (b *Builder) processImageFrom(img builder.Image) error {
 		fmt.Fprintf(b.Stderr, "# Executing %d build %s...\n", nTriggers, word)
 	}
 
-	// Copy the ONBUILD triggers, and remove them from the config, since the config will be comitted.
+	// Copy the ONBUILD triggers, and remove them from the config, since the config will be committed.
 	onBuildTriggers := b.runConfig.OnBuild
 	b.runConfig.OnBuild = []string{}
 
 	// parse the ONBUILD triggers by invoking the parser
 	for _, step := range onBuildTriggers {
-		ast, err := parser.Parse(strings.NewReader(step), &b.directive)
+		ast, err := parser.Parse(strings.NewReader(step))
 		if err != nil {
 			return err
 		}
@@ -460,7 +469,7 @@ func (b *Builder) probeCache() (bool, error) {
 	if !ok || b.options.NoCache || b.cacheBusted {
 		return false, nil
 	}
-	cache, err := c.GetCachedImageOnBuild(b.image, b.runConfig)
+	cache, err := c.GetCachedImage(b.image, b.runConfig)
 	if err != nil {
 		return false, err
 	}
@@ -497,7 +506,7 @@ func (b *Builder) create() (string, error) {
 
 	// TODO: why not embed a hostconfig in builder?
 	hostConfig := &container.HostConfig{
-		Isolation: b.options.Isolation,
+		Isolation: b.options.IsolationLevel,
 		ShmSize:   b.options.ShmSize,
 		Resources: resources,
 	}
@@ -508,7 +517,7 @@ func (b *Builder) create() (string, error) {
 	c, err := b.docker.ContainerCreate(types.ContainerCreateConfig{
 		Config:     b.runConfig,
 		HostConfig: hostConfig,
-	}, true)
+	})
 	if err != nil {
 		return "", err
 	}
@@ -519,40 +528,35 @@ func (b *Builder) create() (string, error) {
 	b.tmpContainers[c.ID] = struct{}{}
 	fmt.Fprintf(b.Stdout, " ---> Running in %s\n", stringid.TruncateID(c.ID))
 
-	// override the entry point that may have been picked up from the base image
-	if err := b.docker.ContainerUpdateCmdOnBuild(c.ID, config.Cmd); err != nil {
-		return "", err
+	if config.Cmd.Len() > 0 {
+		// override the entry point that may have been picked up from the base image
+		if err := b.docker.ContainerUpdateCmd(c.ID, config.Cmd.Slice()); err != nil {
+			return "", err
+		}
 	}
 
 	return c.ID, nil
 }
 
-var errCancelled = errors.New("build cancelled")
-
 func (b *Builder) run(cID string) (err error) {
 	errCh := make(chan error)
 	go func() {
-		errCh <- b.docker.ContainerAttachRaw(cID, nil, b.Stdout, b.Stderr, true)
+		errCh <- b.docker.ContainerAttach(cID, nil, b.Stdout, b.Stderr, true)
 	}()
 
 	finished := make(chan struct{})
-	var once sync.Once
-	finish := func() { close(finished) }
-	cancelErrCh := make(chan error, 1)
-	defer once.Do(finish)
+	defer close(finished)
 	go func() {
 		select {
-		case <-b.clientCtx.Done():
+		case <-b.cancelled:
 			logrus.Debugln("Build cancelled, killing and removing container:", cID)
 			b.docker.ContainerKill(cID, 0)
 			b.removeContainer(cID)
-			cancelErrCh <- errCancelled
 		case <-finished:
-			cancelErrCh <- nil
 		}
 	}()
 
-	if err := b.docker.ContainerStart(cID, nil, true); err != nil {
+	if err := b.docker.ContainerStart(cID, nil); err != nil {
 		return err
 	}
 
@@ -564,12 +568,12 @@ func (b *Builder) run(cID string) (err error) {
 	if ret, _ := b.docker.ContainerWait(cID, -1); ret != 0 {
 		// TODO: change error type, because jsonmessage.JSONError assumes HTTP
 		return &jsonmessage.JSONError{
-			Message: fmt.Sprintf("The command '%s' returned a non-zero code: %d", strings.Join(b.runConfig.Cmd, " "), ret),
+			Message: fmt.Sprintf("The command '%s' returned a non-zero code: %d", b.runConfig.Cmd.ToString(), ret),
 			Code:    ret,
 		}
 	}
-	once.Do(finish)
-	return <-cancelErrCh
+
+	return nil
 }
 
 func (b *Builder) removeContainer(c string) error {
@@ -600,7 +604,7 @@ func (b *Builder) readDockerfile() error {
 	// that then look for 'dockerfile'.  If neither are found then default
 	// back to 'Dockerfile' and use that in the error message.
 	if b.options.Dockerfile == "" {
-		b.options.Dockerfile = builder.DefaultDockerfileName
+		b.options.Dockerfile = api.DefaultDockerfileName
 		if _, _, err := b.context.Stat(b.options.Dockerfile); os.IsNotExist(err) {
 			lowercase := strings.ToLower(b.options.Dockerfile)
 			if _, _, err := b.context.Stat(lowercase); err == nil {
@@ -609,8 +613,25 @@ func (b *Builder) readDockerfile() error {
 		}
 	}
 
-	err := b.parseDockerfile()
-
+	f, err := b.context.Open(b.options.Dockerfile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("Cannot locate specified Dockerfile: %s", b.options.Dockerfile)
+		}
+		return err
+	}
+	if f, ok := f.(*os.File); ok {
+		// ignoring error because Open already succeeded
+		fi, err := f.Stat()
+		if err != nil {
+			return fmt.Errorf("Unexpected error reading Dockerfile: %v", err)
+		}
+		if fi.Size() == 0 {
+			return fmt.Errorf("The Dockerfile (%s) cannot be empty", b.options.Dockerfile)
+		}
+	}
+	b.dockerfile, err = parser.Parse(f)
+	f.Close()
 	if err != nil {
 		return err
 	}
@@ -626,33 +647,6 @@ func (b *Builder) readDockerfile() error {
 	if dockerIgnore, ok := b.context.(builder.DockerIgnoreContext); ok {
 		dockerIgnore.Process([]string{b.options.Dockerfile})
 	}
-	return nil
-}
-
-func (b *Builder) parseDockerfile() error {
-	f, err := b.context.Open(b.options.Dockerfile)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return fmt.Errorf("Cannot locate specified Dockerfile: %s", b.options.Dockerfile)
-		}
-		return err
-	}
-	defer f.Close()
-	if f, ok := f.(*os.File); ok {
-		// ignoring error because Open already succeeded
-		fi, err := f.Stat()
-		if err != nil {
-			return fmt.Errorf("Unexpected error reading Dockerfile: %v", err)
-		}
-		if fi.Size() == 0 {
-			return fmt.Errorf("The Dockerfile (%s) cannot be empty", b.options.Dockerfile)
-		}
-	}
-	b.dockerfile, err = parser.Parse(f, &b.directive)
-	if err != nil {
-		return err
-	}
-
 	return nil
 }
 

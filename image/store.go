@@ -170,9 +170,6 @@ func (is *store) Search(term string) (ID, error) {
 
 	dgst, err := is.digestSet.Lookup(term)
 	if err != nil {
-		if err == digest.ErrDigestNotFound {
-			err = fmt.Errorf("No such image: %s", term)
-		}
 		return "", err
 	}
 	return ID(dgst), nil

@@ -2,8 +2,8 @@ package portmapper
 
 import "net"
 
-func newMockProxyCommand(proto string, hostIP net.IP, hostPort int, containerIP net.IP, containerPort int) (userlandProxy, error) {
-	return &mockProxyCommand{}, nil
+func newMockProxyCommand(proto string, hostIP net.IP, hostPort int, containerIP net.IP, containerPort int) userlandProxy {
+	return &mockProxyCommand{}
 }
 
 type mockProxyCommand struct {

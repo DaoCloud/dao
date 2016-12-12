@@ -22,6 +22,7 @@ import (
 // ImagePushConfig stores push configuration.
 type ImagePushConfig struct {
 	// MetaHeaders store HTTP headers with metadata about the image
+	// (DockerHeaders with prefix X-Meta- in the request).
 	MetaHeaders map[string][]string
 	// AuthConfig holds authentication credentials for authenticating with
 	// the registry.
@@ -31,7 +32,7 @@ type ImagePushConfig struct {
 	ProgressOutput progress.Output
 	// RegistryService is the registry service to use for TLS configuration
 	// and endpoint lookup.
-	RegistryService registry.Service
+	RegistryService *registry.Service
 	// ImageEventLogger notifies events for a given image
 	ImageEventLogger func(id, name, action string)
 	// MetadataStore is the storage backend for distribution-specific
@@ -88,7 +89,7 @@ func NewPusher(ref reference.Named, endpoint registry.APIEndpoint, repoInfo *reg
 	return nil, fmt.Errorf("unknown version %d for registry %s", endpoint.Version, endpoint.URL)
 }
 
-// Push initiates a push operation on ref.
+// Push initiates a push operation on the repository named localName.
 // ref is the specific variant of the image to be pushed.
 // If no tag is provided, all tags will be pushed.
 func Push(ctx context.Context, ref reference.Named, imagePushConfig *ImagePushConfig) error {
@@ -100,7 +101,7 @@ func Push(ctx context.Context, ref reference.Named, imagePushConfig *ImagePushCo
 		return err
 	}
 
-	endpoints, err := imagePushConfig.RegistryService.LookupPushEndpoints(repoInfo.Hostname())
+	endpoints, err := imagePushConfig.RegistryService.LookupPushEndpoints(repoInfo)
 	if err != nil {
 		return err
 	}
@@ -109,7 +110,7 @@ func Push(ctx context.Context, ref reference.Named, imagePushConfig *ImagePushCo
 
 	associations := imagePushConfig.ReferenceStore.ReferencesByName(repoInfo)
 	if len(associations) == 0 {
-		return fmt.Errorf("An image does not exist locally with the tag: %s", repoInfo.Name())
+		return fmt.Errorf("Repository does not exist: %s", repoInfo.Name())
 	}
 
 	var (
@@ -119,24 +120,12 @@ func Push(ctx context.Context, ref reference.Named, imagePushConfig *ImagePushCo
 		// confirm that it was talking to a v2 registry. This will
 		// prevent fallback to the v1 protocol.
 		confirmedV2 bool
-
-		// confirmedTLSRegistries is a map indicating which registries
-		// are known to be using TLS. There should never be a plaintext
-		// retry for any of these.
-		confirmedTLSRegistries = make(map[string]struct{})
 	)
 
 	for _, endpoint := range endpoints {
 		if confirmedV2 && endpoint.Version == registry.APIVersion1 {
 			logrus.Debugf("Skipping v1 endpoint %s because v2 registry was detected", endpoint.URL)
 			continue
-		}
-
-		if endpoint.URL.Scheme != "https" {
-			if _, confirmedTLS := confirmedTLSRegistries[endpoint.URL.Host]; confirmedTLS {
-				logrus.Debugf("Skipping non-TLS endpoint %s for host/port that appears to use TLS", endpoint.URL)
-				continue
-			}
 		}
 
 		logrus.Debugf("Trying to push %s to %s %s", repoInfo.FullName(), endpoint.URL, endpoint.Version)
@@ -154,17 +143,13 @@ func Push(ctx context.Context, ref reference.Named, imagePushConfig *ImagePushCo
 			default:
 				if fallbackErr, ok := err.(fallbackError); ok {
 					confirmedV2 = confirmedV2 || fallbackErr.confirmedV2
-					if fallbackErr.transportOK && endpoint.URL.Scheme == "https" {
-						confirmedTLSRegistries[endpoint.URL.Host] = struct{}{}
-					}
 					err = fallbackErr.err
 					lastErr = err
-					logrus.Errorf("Attempting next endpoint for push after error: %v", err)
 					continue
 				}
 			}
 
-			logrus.Errorf("Not continuing with push after error: %v", err)
+			logrus.Debugf("Not continuing with error: %v", err)
 			return err
 		}
 

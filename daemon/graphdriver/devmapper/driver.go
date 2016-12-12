@@ -28,7 +28,6 @@ type Driver struct {
 	home    string
 	uidMaps []idtools.IDMap
 	gidMaps []idtools.IDMap
-	ctr     *graphdriver.RefCounter
 }
 
 // Init creates a driver with the given home and the set of options.
@@ -47,7 +46,6 @@ func Init(home string, options []string, uidMaps, gidMaps []idtools.IDMap) (grap
 		home:      home,
 		uidMaps:   uidMaps,
 		gidMaps:   gidMaps,
-		ctr:       graphdriver.NewRefCounter(graphdriver.NewDefaultChecker()),
 	}
 
 	return graphdriver.NewNaiveDiffDriver(d, uidMaps, gidMaps), nil
@@ -76,7 +74,6 @@ func (d *Driver) Status() [][2]string {
 		{"Metadata Space Used", fmt.Sprintf("%s", units.HumanSize(float64(s.Metadata.Used)))},
 		{"Metadata Space Total", fmt.Sprintf("%s", units.HumanSize(float64(s.Metadata.Total)))},
 		{"Metadata Space Available", fmt.Sprintf("%s", units.HumanSize(float64(s.Metadata.Available)))},
-		{"Thin Pool Minimum Free Space", fmt.Sprintf("%s", units.HumanSize(float64(s.MinFreeSpace)))},
 		{"Udev Sync Supported", fmt.Sprintf("%v", s.UdevSyncSupported)},
 		{"Deferred Removal Enabled", fmt.Sprintf("%v", s.DeferredRemoveEnabled)},
 		{"Deferred Deletion Enabled", fmt.Sprintf("%v", s.DeferredDeleteEnabled)},
@@ -111,7 +108,7 @@ func (d *Driver) GetMetadata(id string) (map[string]string, error) {
 
 // Cleanup unmounts a device.
 func (d *Driver) Cleanup() error {
-	err := d.DeviceSet.Shutdown(d.home)
+	err := d.DeviceSet.Shutdown()
 
 	if err2 := mount.Unmount(d.home); err == nil {
 		err = err2
@@ -120,15 +117,9 @@ func (d *Driver) Cleanup() error {
 	return err
 }
 
-// CreateReadWrite creates a layer that is writable for use as a container
-// file system.
-func (d *Driver) CreateReadWrite(id, parent, mountLabel string, storageOpt map[string]string) error {
-	return d.Create(id, parent, mountLabel, storageOpt)
-}
-
 // Create adds a device with a given id and the parent.
-func (d *Driver) Create(id, parent, mountLabel string, storageOpt map[string]string) error {
-	if err := d.DeviceSet.AddDevice(id, parent, storageOpt); err != nil {
+func (d *Driver) Create(id, parent, mountLabel string) error {
+	if err := d.DeviceSet.AddDevice(id, parent); err != nil {
 		return err
 	}
 
@@ -160,35 +151,26 @@ func (d *Driver) Remove(id string) error {
 // Get mounts a device with given id into the root filesystem
 func (d *Driver) Get(id, mountLabel string) (string, error) {
 	mp := path.Join(d.home, "mnt", id)
-	rootFs := path.Join(mp, "rootfs")
-	if count := d.ctr.Increment(mp); count > 1 {
-		return rootFs, nil
-	}
 
 	uid, gid, err := idtools.GetRootUIDGID(d.uidMaps, d.gidMaps)
 	if err != nil {
-		d.ctr.Decrement(mp)
 		return "", err
 	}
-
 	// Create the target directories if they don't exist
 	if err := idtools.MkdirAllAs(path.Join(d.home, "mnt"), 0755, uid, gid); err != nil && !os.IsExist(err) {
-		d.ctr.Decrement(mp)
 		return "", err
 	}
 	if err := idtools.MkdirAs(mp, 0755, uid, gid); err != nil && !os.IsExist(err) {
-		d.ctr.Decrement(mp)
 		return "", err
 	}
 
 	// Mount the device
 	if err := d.DeviceSet.MountDevice(id, mp, mountLabel); err != nil {
-		d.ctr.Decrement(mp)
 		return "", err
 	}
 
+	rootFs := path.Join(mp, "rootfs")
 	if err := idtools.MkdirAllAs(rootFs, 0755, uid, gid); err != nil && !os.IsExist(err) {
-		d.ctr.Decrement(mp)
 		d.DeviceSet.UnmountDevice(id, mp)
 		return "", err
 	}
@@ -198,7 +180,6 @@ func (d *Driver) Get(id, mountLabel string) (string, error) {
 		// Create an "id" file with the container/image id in it to help reconstruct this in case
 		// of later problems
 		if err := ioutil.WriteFile(idFile, []byte(id), 0600); err != nil {
-			d.ctr.Decrement(mp)
 			d.DeviceSet.UnmountDevice(id, mp)
 			return "", err
 		}
@@ -210,9 +191,6 @@ func (d *Driver) Get(id, mountLabel string) (string, error) {
 // Put unmounts a device and removes it.
 func (d *Driver) Put(id string) error {
 	mp := path.Join(d.home, "mnt", id)
-	if count := d.ctr.Decrement(mp); count > 0 {
-		return nil
-	}
 	err := d.DeviceSet.UnmountDevice(id, mp)
 	if err != nil {
 		logrus.Errorf("devmapper: Error unmounting device %s: %s", id, err)

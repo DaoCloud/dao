@@ -93,7 +93,7 @@ func (mj *JSONLog) MarshalJSONBuf(buf *bytes.Buffer) error {
 		ffjsonWriteJSONString(buf, mj.Log)
 	}
 	if len(mj.Stream) != 0 {
-		if first {
+		if first == true {
 			first = false
 		} else {
 			buf.WriteString(`,`)
@@ -101,7 +101,9 @@ func (mj *JSONLog) MarshalJSONBuf(buf *bytes.Buffer) error {
 		buf.WriteString(`"stream":`)
 		ffjsonWriteJSONString(buf, mj.Stream)
 	}
-	if !first {
+	if first == true {
+		first = false
+	} else {
 		buf.WriteString(`,`)
 	}
 	buf.WriteString(`"time":`)

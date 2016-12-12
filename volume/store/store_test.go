@@ -12,11 +12,8 @@ import (
 func TestCreate(t *testing.T) {
 	volumedrivers.Register(vt.NewFakeDriver("fake"), "fake")
 	defer volumedrivers.Unregister("fake")
-	s, err := New("")
-	if err != nil {
-		t.Fatal(err)
-	}
-	v, err := s.Create("fake1", "fake", nil, nil)
+	s := New()
+	v, err := s.Create("fake1", "fake", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -27,11 +24,11 @@ func TestCreate(t *testing.T) {
 		t.Fatalf("Expected 1 volume in the store, got %v: %v", len(l), l)
 	}
 
-	if _, err := s.Create("none", "none", nil, nil); err == nil {
+	if _, err := s.Create("none", "none", nil); err == nil {
 		t.Fatalf("Expected unknown driver error, got nil")
 	}
 
-	_, err = s.Create("fakeerror", "fake", map[string]string{"error": "create error"}, nil)
+	_, err = s.Create("fakeerror", "fake", map[string]string{"error": "create error"})
 	expected := &OpErr{Op: "create", Name: "fakeerror", Err: errors.New("create error")}
 	if err != nil && err.Error() != expected.Error() {
 		t.Fatalf("Expected create fakeError: create error, got %v", err)
@@ -43,10 +40,7 @@ func TestRemove(t *testing.T) {
 	volumedrivers.Register(vt.NewFakeDriver("noop"), "noop")
 	defer volumedrivers.Unregister("fake")
 	defer volumedrivers.Unregister("noop")
-	s, err := New("")
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := New()
 
 	// doing string compare here since this error comes directly from the driver
 	expected := "no such volume"
@@ -54,7 +48,7 @@ func TestRemove(t *testing.T) {
 		t.Fatalf("Expected error %q, got %v", expected, err)
 	}
 
-	v, err := s.CreateWithRef("fake1", "fake", "fake", nil, nil)
+	v, err := s.CreateWithRef("fake1", "fake", "fake", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,14 +71,11 @@ func TestList(t *testing.T) {
 	defer volumedrivers.Unregister("fake")
 	defer volumedrivers.Unregister("fake2")
 
-	s, err := New("")
-	if err != nil {
+	s := New()
+	if _, err := s.Create("test", "fake", nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Create("test", "fake", nil, nil); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.Create("test2", "fake2", nil, nil); err != nil {
+	if _, err := s.Create("test2", "fake2", nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -97,10 +88,7 @@ func TestList(t *testing.T) {
 	}
 
 	// and again with a new store
-	s, err = New("")
-	if err != nil {
-		t.Fatal(err)
-	}
+	s = New()
 	ls, _, err = s.List()
 	if err != nil {
 		t.Fatal(err)
@@ -115,18 +103,15 @@ func TestFilterByDriver(t *testing.T) {
 	volumedrivers.Register(vt.NewFakeDriver("noop"), "noop")
 	defer volumedrivers.Unregister("fake")
 	defer volumedrivers.Unregister("noop")
-	s, err := New("")
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := New()
 
-	if _, err := s.Create("fake1", "fake", nil, nil); err != nil {
+	if _, err := s.Create("fake1", "fake", nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Create("fake2", "fake", nil, nil); err != nil {
+	if _, err := s.Create("fake2", "fake", nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Create("fake3", "noop", nil, nil); err != nil {
+	if _, err := s.Create("fake3", "noop", nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -143,15 +128,11 @@ func TestFilterByUsed(t *testing.T) {
 	volumedrivers.Register(vt.NewFakeDriver("fake"), "fake")
 	volumedrivers.Register(vt.NewFakeDriver("noop"), "noop")
 
-	s, err := New("")
-	if err != nil {
+	s := New()
+	if _, err := s.CreateWithRef("fake1", "fake", "volReference", nil); err != nil {
 		t.Fatal(err)
 	}
-
-	if _, err := s.CreateWithRef("fake1", "fake", "volReference", nil, nil); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.Create("fake2", "fake", nil, nil); err != nil {
+	if _, err := s.Create("fake2", "fake", nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -180,12 +161,8 @@ func TestFilterByUsed(t *testing.T) {
 func TestDerefMultipleOfSameRef(t *testing.T) {
 	volumedrivers.Register(vt.NewFakeDriver("fake"), "fake")
 
-	s, err := New("")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	v, err := s.CreateWithRef("fake1", "fake", "volReference", nil, nil)
+	s := New()
+	v, err := s.CreateWithRef("fake1", "fake", "volReference", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

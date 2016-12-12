@@ -5,42 +5,43 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"regexp"
+	"path/filepath"
 	"strings"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/docker/docker/pkg/mount"
 )
 
-func (daemon *Daemon) cleanupMountsByID(id string) error {
-	logrus.Debugf("Cleaning up old mountid %s: start.", id)
+// cleanupMounts umounts shm/mqueue mounts for old containers
+func (daemon *Daemon) cleanupMounts() error {
+	logrus.Debugf("Cleaning up old shm/mqueue mounts: start.")
 	f, err := os.Open("/proc/self/mountinfo")
 	if err != nil {
 		return err
 	}
 	defer f.Close()
 
-	return daemon.cleanupMountsFromReaderByID(f, id, mount.Unmount)
+	return daemon.cleanupMountsFromReader(f, mount.Unmount)
 }
 
-func (daemon *Daemon) cleanupMountsFromReaderByID(reader io.Reader, id string, unmount func(target string) error) error {
-	if daemon.root == "" {
+func (daemon *Daemon) cleanupMountsFromReader(reader io.Reader, unmount func(target string) error) error {
+	if daemon.repository == "" {
 		return nil
 	}
-	var errors []string
-
-	regexps := getCleanPatterns(id)
 	sc := bufio.NewScanner(reader)
+	var errors []string
 	for sc.Scan() {
-		if fields := strings.Fields(sc.Text()); len(fields) >= 4 {
-			if mnt := fields[4]; strings.HasPrefix(mnt, daemon.root) {
-				for _, p := range regexps {
-					if p.MatchString(mnt) {
-						if err := unmount(mnt); err != nil {
-							logrus.Error(err)
-							errors = append(errors, err.Error())
-						}
-					}
+		line := sc.Text()
+		fields := strings.Fields(line)
+		if strings.HasPrefix(fields[4], daemon.repository) {
+			logrus.Debugf("Mount base: %v, repository %s", fields[4], daemon.repository)
+			mnt := fields[4]
+			mountBase := filepath.Base(mnt)
+			if mountBase == "mqueue" || mountBase == "shm" {
+				logrus.Debugf("Unmounting %v", mnt)
+				if err := unmount(mnt); err != nil {
+					logrus.Error(err)
+					errors = append(errors, err.Error())
 				}
 			}
 		}
@@ -51,30 +52,9 @@ func (daemon *Daemon) cleanupMountsFromReaderByID(reader io.Reader, id string, u
 	}
 
 	if len(errors) > 0 {
-		return fmt.Errorf("Error cleaning up mounts:\n%v", strings.Join(errors, "\n"))
+		return fmt.Errorf("Error cleaningup mounts:\n%v", strings.Join(errors, "\n"))
 	}
 
-	logrus.Debugf("Cleaning up old mountid %v: done.", id)
+	logrus.Debugf("Cleaning up old shm/mqueue mounts: done.")
 	return nil
-}
-
-// cleanupMounts umounts shm/mqueue mounts for old containers
-func (daemon *Daemon) cleanupMounts() error {
-	return daemon.cleanupMountsByID("")
-}
-
-func getCleanPatterns(id string) (regexps []*regexp.Regexp) {
-	var patterns []string
-	if id == "" {
-		id = "[0-9a-f]{64}"
-		patterns = append(patterns, "containers/"+id+"/shm")
-	}
-	patterns = append(patterns, "aufs/mnt/"+id+"$", "overlay/"+id+"/merged$", "zfs/graph/"+id+"$")
-	for _, p := range patterns {
-		r, err := regexp.Compile(p)
-		if err == nil {
-			regexps = append(regexps, r)
-		}
-	}
-	return
 }

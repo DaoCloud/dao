@@ -3,6 +3,7 @@ package netlink
 import (
 	"fmt"
 	"net"
+	"syscall"
 )
 
 // Link represents a link device from netlink. Shared link attributes
@@ -30,7 +31,6 @@ type LinkAttrs struct {
 	MasterIndex  int         // must be the index of a bridge
 	Namespace    interface{} // nil | NsPid | NsFd
 	Alias        string
-	Statistics   *LinkStatistics
 }
 
 // NewLinkAttrs returns LinkAttrs structure filled with default values
@@ -38,35 +38,6 @@ func NewLinkAttrs() LinkAttrs {
 	return LinkAttrs{
 		TxQLen: -1,
 	}
-}
-
-/*
-Ref: struct rtnl_link_stats {...}
-*/
-type LinkStatistics struct {
-	RxPackets         uint32
-	TxPackets         uint32
-	RxBytes           uint32
-	TxBytes           uint32
-	RxErrors          uint32
-	TxErrors          uint32
-	RxDropped         uint32
-	TxDropped         uint32
-	Multicast         uint32
-	Collisions        uint32
-	RxLengthErrors    uint32
-	RxOverErrors      uint32
-	RxCrcErrors       uint32
-	RxFrameErrors     uint32
-	RxFifoErrors      uint32
-	RxMissedErrors    uint32
-	TxAbortedErrors   uint32
-	TxCarrierErrors   uint32
-	TxFifoErrors      uint32
-	TxHeartbeatErrors uint32
-	TxWindowErrors    uint32
-	RxCompressed      uint32
-	TxCompressed      uint32
 }
 
 // Device links cannot be created via netlink. These links
@@ -172,6 +143,11 @@ func (macvtap Macvtap) Type() string {
 
 type TuntapMode uint16
 
+const (
+	TUNTAP_MODE_TUN TuntapMode = syscall.IFF_TUN
+	TUNTAP_MODE_TAP TuntapMode = syscall.IFF_TAP
+)
+
 // Tuntap links created via /dev/tun/tap, but can be destroyed via netlink
 type Tuntap struct {
 	LinkAttrs
@@ -228,7 +204,6 @@ type Vxlan struct {
 	RSC          bool
 	L2miss       bool
 	L3miss       bool
-	UDPCSum      bool
 	NoAge        bool
 	GBP          bool
 	Age          int
@@ -449,7 +424,7 @@ const (
 	BOND_AD_SELECT_COUNT
 )
 
-// BondAdInfo represents ad info for bond
+// BondAdInfo
 type BondAdInfo struct {
 	AggregatorId int
 	NumPorts     int
@@ -550,7 +525,7 @@ func (bond *Bond) Type() string {
 	return "bond"
 }
 
-// Gretap devices must specify LocalIP and RemoteIP on create
+// GreTap devices must specify LocalIP and RemoteIP on create
 type Gretap struct {
 	LinkAttrs
 	IKey       uint32

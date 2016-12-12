@@ -23,7 +23,6 @@ import (
 	"path"
 
 	"github.com/Sirupsen/logrus"
-	"github.com/docker/notary"
 	"github.com/docker/notary/tuf/validation"
 )
 
@@ -34,9 +33,6 @@ type ErrServerUnavailable struct {
 }
 
 func (err ErrServerUnavailable) Error() string {
-	if err.code == 401 {
-		return fmt.Sprintf("you are not authorized to perform this operation: server returned 401.")
-	}
 	return fmt.Sprintf("unable to reach trust server at this time: %d.", err.code)
 }
 
@@ -75,12 +71,13 @@ type HTTPStore struct {
 	baseURL       url.URL
 	metaPrefix    string
 	metaExtension string
+	targetsPrefix string
 	keyExtension  string
 	roundTrip     http.RoundTripper
 }
 
 // NewHTTPStore initializes a new store against a URL and a number of configuration options
-func NewHTTPStore(baseURL, metaPrefix, metaExtension, keyExtension string, roundTrip http.RoundTripper) (RemoteStore, error) {
+func NewHTTPStore(baseURL, metaPrefix, metaExtension, targetsPrefix, keyExtension string, roundTrip http.RoundTripper) (RemoteStore, error) {
 	base, err := url.Parse(baseURL)
 	if err != nil {
 		return nil, err
@@ -95,6 +92,7 @@ func NewHTTPStore(baseURL, metaPrefix, metaExtension, keyExtension string, round
 		baseURL:       *base,
 		metaPrefix:    metaPrefix,
 		metaExtension: metaExtension,
+		targetsPrefix: targetsPrefix,
 		keyExtension:  keyExtension,
 		roundTrip:     roundTrip,
 	}, nil
@@ -139,8 +137,6 @@ func translateStatusToError(resp *http.Response, resource string) error {
 // GetMeta downloads the named meta file with the given size. A short body
 // is acceptable because in the case of timestamp.json, the size is a cap,
 // not an exact length.
-// If size is "NoSizeLimit", this corresponds to "infinite," but we cut off at a
-// predefined threshold "notary.MaxDownloadSize".
 func (s HTTPStore) GetMeta(name string, size int64) ([]byte, error) {
 	url, err := s.buildMetaURL(name)
 	if err != nil {
@@ -158,9 +154,6 @@ func (s HTTPStore) GetMeta(name string, size int64) ([]byte, error) {
 	if err := translateStatusToError(resp, name); err != nil {
 		logrus.Debugf("received HTTP status %d when requesting %s.", resp.StatusCode, name)
 		return nil, err
-	}
-	if size == NoSizeLimit {
-		size = notary.MaxDownloadSize
 	}
 	if resp.ContentLength > size {
 		return nil, ErrMaliciousServer{}
@@ -257,6 +250,11 @@ func (s HTTPStore) buildMetaURL(name string) (*url.URL, error) {
 	return s.buildURL(uri)
 }
 
+func (s HTTPStore) buildTargetsURL(name string) (*url.URL, error) {
+	uri := path.Join(s.targetsPrefix, name)
+	return s.buildURL(uri)
+}
+
 func (s HTTPStore) buildKeyURL(name string) (*url.URL, error) {
 	filename := fmt.Sprintf("%s.%s", name, s.keyExtension)
 	uri := path.Join(s.metaPrefix, filename)
@@ -269,6 +267,29 @@ func (s HTTPStore) buildURL(uri string) (*url.URL, error) {
 		return nil, err
 	}
 	return s.baseURL.ResolveReference(sub), nil
+}
+
+// GetTarget returns a reader for the desired target or an error.
+// N.B. The caller is responsible for closing the reader.
+func (s HTTPStore) GetTarget(path string) (io.ReadCloser, error) {
+	url, err := s.buildTargetsURL(path)
+	if err != nil {
+		return nil, err
+	}
+	logrus.Debug("Attempting to download target: ", url.String())
+	req, err := http.NewRequest("GET", url.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := s.roundTrip.RoundTrip(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if err := translateStatusToError(resp, path); err != nil {
+		return nil, err
+	}
+	return resp.Body, nil
 }
 
 // GetKey retrieves a public key from the remote server

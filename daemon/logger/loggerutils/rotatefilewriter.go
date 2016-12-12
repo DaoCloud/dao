@@ -13,7 +13,6 @@ type RotateFileWriter struct {
 	f            *os.File // store for closing
 	mu           sync.Mutex
 	capacity     int64 //maximum size of each file
-	currentSize  int64 // current size of the latest file
 	maxFiles     int   //maximum number of files
 	notifyRotate *pubsub.Publisher
 }
@@ -22,18 +21,12 @@ type RotateFileWriter struct {
 func NewRotateFileWriter(logPath string, capacity int64, maxFiles int) (*RotateFileWriter, error) {
 	log, err := os.OpenFile(logPath, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0640)
 	if err != nil {
-		return nil, err
-	}
-
-	size, err := log.Seek(0, os.SEEK_END)
-	if err != nil {
-		return nil, err
+		return &RotateFileWriter{}, err
 	}
 
 	return &RotateFileWriter{
 		f:            log,
 		capacity:     capacity,
-		currentSize:  size,
 		maxFiles:     maxFiles,
 		notifyRotate: pubsub.NewPublisher(0, 1),
 	}, nil
@@ -42,17 +35,12 @@ func NewRotateFileWriter(logPath string, capacity int64, maxFiles int) (*RotateF
 //WriteLog write log message to File
 func (w *RotateFileWriter) Write(message []byte) (int, error) {
 	w.mu.Lock()
+	defer w.mu.Unlock()
 	if err := w.checkCapacityAndRotate(); err != nil {
-		w.mu.Unlock()
 		return -1, err
 	}
 
-	n, err := w.f.Write(message)
-	if err == nil {
-		w.currentSize += int64(n)
-	}
-	w.mu.Unlock()
-	return n, err
+	return w.f.Write(message)
 }
 
 func (w *RotateFileWriter) checkCapacityAndRotate() error {
@@ -60,7 +48,12 @@ func (w *RotateFileWriter) checkCapacityAndRotate() error {
 		return nil
 	}
 
-	if w.currentSize >= w.capacity {
+	meta, err := w.f.Stat()
+	if err != nil {
+		return err
+	}
+
+	if meta.Size() >= w.capacity {
 		name := w.f.Name()
 		if err := w.f.Close(); err != nil {
 			return err
@@ -73,7 +66,6 @@ func (w *RotateFileWriter) checkCapacityAndRotate() error {
 			return err
 		}
 		w.f = file
-		w.currentSize = 0
 		w.notifyRotate.Publish(struct{}{})
 	}
 
@@ -87,15 +79,31 @@ func rotate(name string, maxFiles int) error {
 	for i := maxFiles - 1; i > 1; i-- {
 		toPath := name + "." + strconv.Itoa(i)
 		fromPath := name + "." + strconv.Itoa(i-1)
-		if err := os.Rename(fromPath, toPath); err != nil && !os.IsNotExist(err) {
+		if err := backup(fromPath, toPath); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 	}
 
-	if err := os.Rename(name, name+".1"); err != nil && !os.IsNotExist(err) {
+	if err := backup(name, name+".1"); err != nil {
 		return err
 	}
 	return nil
+}
+
+// backup renames a file from fromPath to toPath
+func backup(fromPath, toPath string) error {
+	if _, err := os.Stat(fromPath); os.IsNotExist(err) {
+		return err
+	}
+
+	if _, err := os.Stat(toPath); !os.IsNotExist(err) {
+		err := os.Remove(toPath)
+		if err != nil {
+			return err
+		}
+	}
+
+	return os.Rename(fromPath, toPath)
 }
 
 // LogPath returns the location the given writer logs to.

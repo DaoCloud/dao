@@ -82,10 +82,8 @@ func (a *Allocator) getStore(as string) datastore.DataStore {
 
 func (a *Allocator) getAddressSpaceFromStore(as string) (*addrSpace, error) {
 	store := a.getStore(as)
-
-	// IPAM may not have a valid store. In such cases it is just in-memory state.
 	if store == nil {
-		return nil, nil
+		return nil, types.InternalErrorf("store for address space %s not found", as)
 	}
 
 	pc := &addrSpace{id: dsConfigKey + "/" + as, ds: store, alloc: a}
@@ -102,10 +100,8 @@ func (a *Allocator) getAddressSpaceFromStore(as string) (*addrSpace, error) {
 
 func (a *Allocator) writeToStore(aSpace *addrSpace) error {
 	store := aSpace.store()
-
-	// IPAM may not have a valid store. In such cases it is just in-memory state.
 	if store == nil {
-		return nil
+		return types.InternalErrorf("invalid store while trying to write %s address space", aSpace.DataScope())
 	}
 
 	err := store.PutObjectAtomic(aSpace)
@@ -118,10 +114,8 @@ func (a *Allocator) writeToStore(aSpace *addrSpace) error {
 
 func (a *Allocator) deleteFromStore(aSpace *addrSpace) error {
 	store := aSpace.store()
-
-	// IPAM may not have a valid store. In such cases it is just in-memory state.
 	if store == nil {
-		return nil
+		return types.InternalErrorf("invalid store while trying to delete %s address space", aSpace.DataScope())
 	}
 
 	return store.DeleteObjectAtomic(aSpace)

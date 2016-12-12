@@ -17,8 +17,8 @@ var (
 	ErrPathOutsideStore = errors.New("path outside file store")
 )
 
-// Storage implements the bare bones primitives (no hierarchy)
-type Storage interface {
+// LimitedFileStore implements the bare bones primitives (no hierarchy)
+type LimitedFileStore interface {
 	// Add writes a file to the specified location, returning an error if this
 	// is not possible (reasons may include permissions errors). The path is cleaned
 	// before being made absolute against the store's base dir.
@@ -37,6 +37,16 @@ type Storage interface {
 
 	// ListFiles returns a list of paths relative to the base directory of the
 	// filestore. Any of these paths must be retrievable via the
-	// Storage.Get method.
+	// LimitedFileStore.Get method.
 	ListFiles() []string
+}
+
+// FileStore is the interface for full-featured FileStores
+type FileStore interface {
+	LimitedFileStore
+
+	RemoveDir(directoryName string) error
+	GetPath(fileName string) (string, error)
+	ListDir(directoryName string) []string
+	BaseDir() string
 }

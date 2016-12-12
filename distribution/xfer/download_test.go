@@ -5,12 +5,10 @@ import (
 	"errors"
 	"io"
 	"io/ioutil"
-	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/docker/distribution"
 	"github.com/docker/distribution/digest"
 	"github.com/docker/docker/image"
 	"github.com/docker/docker/layer"
@@ -72,10 +70,6 @@ func createChainIDFromParent(parent layer.ChainID, dgsts ...layer.DiffID) layer.
 }
 
 func (ls *mockLayerStore) Register(reader io.Reader, parentID layer.ChainID) (layer.Layer, error) {
-	return ls.RegisterWithDescriptor(reader, parentID, distribution.Descriptor{})
-}
-
-func (ls *mockLayerStore) RegisterWithDescriptor(reader io.Reader, parentID layer.ChainID, _ distribution.Descriptor) (layer.Layer, error) {
 	var (
 		parent layer.Layer
 		err    error
@@ -111,19 +105,18 @@ func (ls *mockLayerStore) Get(chainID layer.ChainID) (layer.Layer, error) {
 func (ls *mockLayerStore) Release(l layer.Layer) ([]layer.Metadata, error) {
 	return []layer.Metadata{}, nil
 }
-func (ls *mockLayerStore) CreateRWLayer(string, layer.ChainID, string, layer.MountInit, map[string]string) (layer.RWLayer, error) {
+func (ls *mockLayerStore) CreateRWLayer(string, layer.ChainID, string, layer.MountInit) (layer.RWLayer, error) {
 	return nil, errors.New("not implemented")
 }
 
 func (ls *mockLayerStore) GetRWLayer(string) (layer.RWLayer, error) {
 	return nil, errors.New("not implemented")
+
 }
 
 func (ls *mockLayerStore) ReleaseRWLayer(layer.RWLayer) ([]layer.Metadata, error) {
 	return nil, errors.New("not implemented")
-}
-func (ls *mockLayerStore) GetMountID(string) (string, error) {
-	return "", errors.New("not implemented")
+
 }
 
 func (ls *mockLayerStore) Cleanup() error {
@@ -206,9 +199,6 @@ func (d *mockDownloadDescriptor) Download(ctx context.Context, progressOutput pr
 	return d.mockTarStream(), 0, nil
 }
 
-func (d *mockDownloadDescriptor) Close() {
-}
-
 func downloadDescriptors(currentDownloads *int32) []DownloadDescriptor {
 	return []DownloadDescriptor{
 		&mockDownloadDescriptor{
@@ -246,10 +236,6 @@ func downloadDescriptors(currentDownloads *int32) []DownloadDescriptor {
 }
 
 func TestSuccessfulDownload(t *testing.T) {
-	// TODO Windows: Fix this unit text
-	if runtime.GOOS == "windows" {
-		t.Skip("Needs fixing on Windows")
-	}
 	layerStore := &mockLayerStore{make(map[layer.ChainID]*mockLayer)}
 	ldm := NewLayerDownloadManager(layerStore, maxDownloadConcurrency)
 

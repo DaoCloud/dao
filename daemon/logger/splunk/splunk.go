@@ -174,7 +174,9 @@ func (l *splunkLogger) Log(msg *logger.Message) error {
 	if err != nil {
 		return err
 	}
-	defer res.Body.Close()
+	if res.Body != nil {
+		defer res.Body.Close()
+	}
 	if res.StatusCode != http.StatusOK {
 		var body []byte
 		body, err = ioutil.ReadAll(res.Body)
@@ -234,7 +236,7 @@ func parseURL(ctx logger.Context) (*url.URL, error) {
 		(splunkURL.Path != "" && splunkURL.Path != "/") ||
 		splunkURL.RawQuery != "" ||
 		splunkURL.Fragment != "" {
-		return nil, fmt.Errorf("%s: expected format scheme://dns_name_or_ip:port for %s", driverName, splunkURLKey)
+		return nil, fmt.Errorf("%s: expected format schema://dns_name_or_ip:port for %s", driverName, splunkURLKey)
 	}
 
 	splunkURL.Path = "/services/collector/event/1.0"

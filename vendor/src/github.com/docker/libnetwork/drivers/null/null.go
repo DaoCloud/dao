@@ -4,7 +4,6 @@ import (
 	"sync"
 
 	"github.com/docker/libnetwork/datastore"
-	"github.com/docker/libnetwork/discoverapi"
 	"github.com/docker/libnetwork/driverapi"
 	"github.com/docker/libnetwork/types"
 )
@@ -24,18 +23,7 @@ func Init(dc driverapi.DriverCallback, config map[string]interface{}) error {
 	return dc.RegisterDriver(networkType, &driver{}, c)
 }
 
-func (d *driver) NetworkAllocate(id string, option map[string]string, ipV4Data, ipV6Data []driverapi.IPAMData) (map[string]string, error) {
-	return nil, types.NotImplementedErrorf("not implemented")
-}
-
-func (d *driver) NetworkFree(id string) error {
-	return types.NotImplementedErrorf("not implemented")
-}
-
-func (d *driver) EventNotify(etype driverapi.EventType, nid, tableName, key string, value []byte) {
-}
-
-func (d *driver) CreateNetwork(id string, option map[string]interface{}, nInfo driverapi.NetworkInfo, ipV4Data, ipV6Data []driverapi.IPAMData) error {
+func (d *driver) CreateNetwork(id string, option map[string]interface{}, ipV4Data, ipV6Data []driverapi.IPAMData) error {
 	d.Lock()
 	defer d.Unlock()
 
@@ -74,24 +62,16 @@ func (d *driver) Leave(nid, eid string) error {
 	return nil
 }
 
-func (d *driver) ProgramExternalConnectivity(nid, eid string, options map[string]interface{}) error {
-	return nil
-}
-
-func (d *driver) RevokeExternalConnectivity(nid, eid string) error {
-	return nil
-}
-
 func (d *driver) Type() string {
 	return networkType
 }
 
 // DiscoverNew is a notification for a new discovery event, such as a new node joining a cluster
-func (d *driver) DiscoverNew(dType discoverapi.DiscoveryType, data interface{}) error {
+func (d *driver) DiscoverNew(dType driverapi.DiscoveryType, data interface{}) error {
 	return nil
 }
 
 // DiscoverDelete is a notification for a discovery delete event, such as a node leaving a cluster
-func (d *driver) DiscoverDelete(dType discoverapi.DiscoveryType, data interface{}) error {
+func (d *driver) DiscoverDelete(dType driverapi.DiscoveryType, data interface{}) error {
 	return nil
 }

@@ -9,10 +9,10 @@ DOCKER_RUN_SHAKERS := docker run $(if $(CIRCLECI),,--rm) -it $(SHAKERS_ENVS) $(S
 
 print-%: ; @echo $*=$($*)
 
-default: all
+default: binary
 
-all: build
-	$(DOCKER_RUN_SHAKERS) ./script/make.sh
+binary: build
+	$(DOCKER_RUN_SHAKERS) ./script/make.sh binary
 
 test-unit: build
 	$(DOCKER_RUN_SHAKERS) ./script/make.sh test-unit
@@ -35,3 +35,6 @@ build:
 shell: build
 	$(DOCKER_RUN_SHAKERS) /bin/bash
 
+run-dev:
+	go build
+	./traefik

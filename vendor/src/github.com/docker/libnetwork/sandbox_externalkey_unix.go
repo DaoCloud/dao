@@ -1,4 +1,4 @@
-// +build linux freebsd
+// +build !windows
 
 package libnetwork
 
@@ -12,15 +12,16 @@ import (
 
 	"github.com/Sirupsen/logrus"
 	"github.com/docker/libnetwork/types"
+	"github.com/opencontainers/runc/libcontainer"
 	"github.com/opencontainers/runc/libcontainer/configs"
 )
 
-const udsBase = "/run/docker/libnetwork/"
+const udsBase = "/var/lib/docker/network/files/"
 const success = "success"
 
 // processSetKeyReexec is a private function that must be called only on an reexec path
 // It expects 3 args { [0] = "libnetwork-setkey", [1] = <container-id>, [2] = <controller-id> }
-// It also expects configs.HookState as a json string in <stdin>
+// It also expects libcontainer.State as a json string in <stdin>
 // Refer to https://github.com/opencontainers/runc/pull/160/ for more information
 func processSetKeyReexec() {
 	var err error
@@ -39,19 +40,20 @@ func processSetKeyReexec() {
 	}
 	containerID := os.Args[1]
 
-	// We expect configs.HookState as a json string in <stdin>
+	// We expect libcontainer.State as a json string in <stdin>
 	stateBuf, err := ioutil.ReadAll(os.Stdin)
 	if err != nil {
 		return
 	}
-	var state configs.HookState
+	var state libcontainer.State
 	if err = json.Unmarshal(stateBuf, &state); err != nil {
 		return
 	}
 
 	controllerID := os.Args[2]
+	key := state.NamespacePaths[configs.NamespaceType("NEWNET")]
 
-	err = SetExternalKey(controllerID, containerID, fmt.Sprintf("/proc/%d/ns/net", state.Pid))
+	err = SetExternalKey(controllerID, containerID, key)
 	return
 }
 
@@ -128,15 +130,13 @@ func (c *controller) acceptClientConnections(sock string, l net.Listener) {
 		conn, err := l.Accept()
 		if err != nil {
 			if _, err1 := os.Stat(sock); os.IsNotExist(err1) {
-				logrus.Debugf("Unix socket %s doesn't exist. cannot accept client connections", sock)
+				logrus.Debugf("Unix socket %s doesnt exist. cannot accept client connections", sock)
 				return
 			}
 			logrus.Errorf("Error accepting connection %v", err)
 			continue
 		}
 		go func() {
-			defer conn.Close()
-
 			err := c.processExternalKey(conn)
 			ret := success
 			if err != nil {

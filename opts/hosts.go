@@ -4,12 +4,16 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"runtime"
 	"strconv"
 	"strings"
 )
 
 var (
 	// DefaultHTTPPort Default HTTP Port used if only the protocol is provided to -H flag e.g. docker daemon -H tcp://
+	// TODO Windows. DefaultHTTPPort is only used on Windows if a -H parameter
+	// is not supplied. A better longer term solution would be to use a named
+	// pipe as the default on the Windows daemon.
 	// These are the IANA registered port numbers for use with Docker
 	// see http://www.iana.org/assignments/service-names-port-numbers/service-names-port-numbers.xhtml?search=docker
 	DefaultHTTPPort = 2375 // Default HTTP Port
@@ -22,19 +26,13 @@ var (
 	DefaultTCPHost = fmt.Sprintf("tcp://%s:%d", DefaultHTTPHost, DefaultHTTPPort)
 	// DefaultTLSHost constant defines the default host string used by docker for TLS sockets
 	DefaultTLSHost = fmt.Sprintf("tcp://%s:%d", DefaultHTTPHost, DefaultTLSHTTPPort)
-	// DefaultNamedPipe defines the default named pipe used by docker on Windows
-	DefaultNamedPipe = `//./pipe/docker_engine`
 )
 
 // ValidateHost validates that the specified string is a valid host and returns it.
 func ValidateHost(val string) (string, error) {
-	host := strings.TrimSpace(val)
-	// The empty string means default and is not handled by parseDockerDaemonHost
-	if host != "" {
-		_, err := parseDockerDaemonHost(host)
-		if err != nil {
-			return val, err
-		}
+	_, err := parseDockerDaemonHost(DefaultTCPHost, DefaultTLSHost, DefaultUnixSocket, "", val)
+	if err != nil {
+		return val, err
 	}
 	// Note: unlike most flag validators, we don't return the mutated value here
 	//       we need to know what the user entered later (using ParseHost) to adjust for tls
@@ -42,39 +40,39 @@ func ValidateHost(val string) (string, error) {
 }
 
 // ParseHost and set defaults for a Daemon host string
-func ParseHost(defaultToTLS bool, val string) (string, error) {
-	host := strings.TrimSpace(val)
-	if host == "" {
-		if defaultToTLS {
-			host = DefaultTLSHost
-		} else {
-			host = DefaultHost
-		}
-	} else {
-		var err error
-		host, err = parseDockerDaemonHost(host)
-		if err != nil {
-			return val, err
-		}
+func ParseHost(defaultHost, val string) (string, error) {
+	host, err := parseDockerDaemonHost(DefaultTCPHost, DefaultTLSHost, DefaultUnixSocket, defaultHost, val)
+	if err != nil {
+		return val, err
 	}
 	return host, nil
 }
 
 // parseDockerDaemonHost parses the specified address and returns an address that will be used as the host.
-// Depending of the address specified, this may return one of the global Default* strings defined in hosts.go.
-func parseDockerDaemonHost(addr string) (string, error) {
-	addrParts := strings.SplitN(addr, "://", 2)
-	if len(addrParts) == 1 && addrParts[0] != "" {
+// Depending of the address specified, will use the defaultTCPAddr or defaultUnixAddr
+// defaultUnixAddr must be a absolute file path (no `unix://` prefix)
+// defaultTCPAddr must be the full `tcp://host:port` form
+func parseDockerDaemonHost(defaultTCPAddr, defaultTLSHost, defaultUnixAddr, defaultAddr, addr string) (string, error) {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		if defaultAddr == defaultTLSHost {
+			return defaultTLSHost, nil
+		}
+		if runtime.GOOS != "windows" {
+			return fmt.Sprintf("unix://%s", defaultUnixAddr), nil
+		}
+		return defaultTCPAddr, nil
+	}
+	addrParts := strings.Split(addr, "://")
+	if len(addrParts) == 1 {
 		addrParts = []string{"tcp", addrParts[0]}
 	}
 
 	switch addrParts[0] {
 	case "tcp":
-		return ParseTCPAddr(addrParts[1], DefaultTCPHost)
+		return parseTCPAddr(addrParts[1], defaultTCPAddr)
 	case "unix":
-		return parseSimpleProtoAddr("unix", addrParts[1], DefaultUnixSocket)
-	case "npipe":
-		return parseSimpleProtoAddr("npipe", addrParts[1], DefaultNamedPipe)
+		return parseUnixAddr(addrParts[1], defaultUnixAddr)
 	case "fd":
 		return addr, nil
 	default:
@@ -82,27 +80,27 @@ func parseDockerDaemonHost(addr string) (string, error) {
 	}
 }
 
-// parseSimpleProtoAddr parses and validates that the specified address is a valid
-// socket address for simple protocols like unix and npipe. It returns a formatted
-// socket address, either using the address parsed from addr, or the contents of
-// defaultAddr if addr is a blank string.
-func parseSimpleProtoAddr(proto, addr, defaultAddr string) (string, error) {
-	addr = strings.TrimPrefix(addr, proto+"://")
+// parseUnixAddr parses and validates that the specified address is a valid UNIX
+// socket address. It returns a formatted UNIX socket address, either using the
+// address parsed from addr, or the contents of defaultAddr if addr is a blank
+// string.
+func parseUnixAddr(addr string, defaultAddr string) (string, error) {
+	addr = strings.TrimPrefix(addr, "unix://")
 	if strings.Contains(addr, "://") {
-		return "", fmt.Errorf("Invalid proto, expected %s: %s", proto, addr)
+		return "", fmt.Errorf("Invalid proto, expected unix: %s", addr)
 	}
 	if addr == "" {
 		addr = defaultAddr
 	}
-	return fmt.Sprintf("%s://%s", proto, addr), nil
+	return fmt.Sprintf("unix://%s", addr), nil
 }
 
-// ParseTCPAddr parses and validates that the specified address is a valid TCP
+// parseTCPAddr parses and validates that the specified address is a valid TCP
 // address. It returns a formatted TCP address, either using the address parsed
 // from tryAddr, or the contents of defaultAddr if tryAddr is a blank string.
 // tryAddr is expected to have already been Trim()'d
 // defaultAddr must be in the full `tcp://host:port` form
-func ParseTCPAddr(tryAddr string, defaultAddr string) (string, error) {
+func parseTCPAddr(tryAddr string, defaultAddr string) (string, error) {
 	if tryAddr == "" || tryAddr == "tcp://" {
 		return defaultAddr, nil
 	}
@@ -127,11 +125,8 @@ func ParseTCPAddr(tryAddr string, defaultAddr string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+
 	host, port, err := net.SplitHostPort(u.Host)
-	if err != nil {
-		// try port addition once
-		host, port, err = net.SplitHostPort(net.JoinHostPort(u.Host, defaultPort))
-	}
 	if err != nil {
 		return "", fmt.Errorf("Invalid bind address format: %s", tryAddr)
 	}

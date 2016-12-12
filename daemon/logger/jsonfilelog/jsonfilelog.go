@@ -25,6 +25,7 @@ type JSONFileLogger struct {
 	buf     *bytes.Buffer
 	writer  *loggerutils.RotateFileWriter
 	mu      sync.Mutex
+	ctx     logger.Context
 	readers map[*logger.LogWatcher]struct{} // stores the active log followers
 	extra   []byte                          // json-encoded extra attributes
 }
@@ -90,6 +91,7 @@ func (l *JSONFileLogger) Log(msg *logger.Message) error {
 		return err
 	}
 	l.mu.Lock()
+	defer l.mu.Unlock()
 	err = (&jsonlog.JSONLogs{
 		Log:      append(msg.Line, '\n'),
 		Stream:   msg.Source,
@@ -97,14 +99,12 @@ func (l *JSONFileLogger) Log(msg *logger.Message) error {
 		RawAttrs: l.extra,
 	}).MarshalJSONBuf(l.buf)
 	if err != nil {
-		l.mu.Unlock()
 		return err
 	}
 
 	l.buf.WriteByte('\n')
 	_, err = l.writer.Write(l.buf.Bytes())
 	l.buf.Reset()
-	l.mu.Unlock()
 
 	return err
 }

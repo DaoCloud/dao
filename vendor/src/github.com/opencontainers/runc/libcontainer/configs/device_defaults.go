@@ -3,7 +3,7 @@
 package configs
 
 var (
-	// DefaultSimpleDevices are devices that are to be both allowed and created.
+	// These are devices that are to be both allowed and created.
 	DefaultSimpleDevices = []*Device{
 		// /dev/null and zero
 		{
@@ -82,6 +82,20 @@ var (
 			Minor:       1,
 			Permissions: "rwm",
 		},
+		{
+			Path:        "/dev/tty0",
+			Type:        'c',
+			Major:       4,
+			Minor:       0,
+			Permissions: "rwm",
+		},
+		{
+			Path:        "/dev/tty1",
+			Type:        'c',
+			Major:       4,
+			Minor:       1,
+			Permissions: "rwm",
+		},
 		// /dev/pts/ - pts namespaces are "coming soon"
 		{
 			Path:        "",
@@ -107,5 +121,19 @@ var (
 			Permissions: "rwm",
 		},
 	}, DefaultSimpleDevices...)
-	DefaultAutoCreatedDevices = append([]*Device{}, DefaultSimpleDevices...)
+	DefaultAutoCreatedDevices = append([]*Device{
+		{
+			// /dev/fuse is created but not allowed.
+			// This is to allow java to work.  Because java
+			// Insists on there being a /dev/fuse
+			// https://github.com/docker/docker/issues/514
+			// https://github.com/docker/docker/issues/2393
+			//
+			Path:        "/dev/fuse",
+			Type:        'c',
+			Major:       10,
+			Minor:       229,
+			Permissions: "rwm",
+		},
+	}, DefaultSimpleDevices...)
 )

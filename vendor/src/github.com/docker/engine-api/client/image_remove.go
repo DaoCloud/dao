@@ -5,11 +5,10 @@ import (
 	"net/url"
 
 	"github.com/docker/engine-api/types"
-	"golang.org/x/net/context"
 )
 
 // ImageRemove removes an image from the docker host.
-func (cli *Client) ImageRemove(ctx context.Context, imageID string, options types.ImageRemoveOptions) ([]types.ImageDelete, error) {
+func (cli *Client) ImageRemove(options types.ImageRemoveOptions) ([]types.ImageDelete, error) {
 	query := url.Values{}
 
 	if options.Force {
@@ -19,13 +18,13 @@ func (cli *Client) ImageRemove(ctx context.Context, imageID string, options type
 		query.Set("noprune", "1")
 	}
 
-	resp, err := cli.delete(ctx, "/images/"+imageID, query, nil)
+	resp, err := cli.delete("/images/"+options.ImageID, query, nil)
 	if err != nil {
 		return nil, err
 	}
+	defer ensureReaderClosed(resp)
 
 	var dels []types.ImageDelete
 	err = json.NewDecoder(resp.body).Decode(&dels)
-	ensureReaderClosed(resp)
 	return dels, err
 }
