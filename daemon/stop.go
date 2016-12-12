@@ -1,11 +1,13 @@
 package daemon
 
 import (
+	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/docker/docker/container"
-	derr "github.com/docker/docker/errors"
+	"github.com/docker/docker/errors"
 )
 
 // ContainerStop looks for the given container and terminates it,
@@ -20,10 +22,11 @@ func (daemon *Daemon) ContainerStop(name string, seconds int) error {
 		return err
 	}
 	if !container.IsRunning() {
-		return derr.ErrorCodeStopped
+		err := fmt.Errorf("Container %s is already stopped", name)
+		return errors.NewErrorWithStatusCode(err, http.StatusNotModified)
 	}
 	if err := daemon.containerStop(container, seconds); err != nil {
-		return derr.ErrorCodeCantStop.WithArgs(name, err)
+		return fmt.Errorf("Cannot stop container %s: %v", name, err)
 	}
 	return nil
 }
@@ -38,9 +41,12 @@ func (daemon *Daemon) containerStop(container *container.Container, seconds int)
 		return nil
 	}
 
-	// 1. Send a SIGTERM
-	if err := daemon.killPossiblyDeadProcess(container, container.StopSignal()); err != nil {
-		logrus.Infof("Failed to send SIGTERM to the process, force killing")
+	daemon.stopHealthchecks(container)
+
+	stopSignal := container.StopSignal()
+	// 1. Send a stop signal
+	if err := daemon.killPossiblyDeadProcess(container, stopSignal); err != nil {
+		logrus.Infof("Failed to send signal %d to the process, force killing", stopSignal)
 		if err := daemon.killPossiblyDeadProcess(container, 9); err != nil {
 			return err
 		}
@@ -48,7 +54,7 @@ func (daemon *Daemon) containerStop(container *container.Container, seconds int)
 
 	// 2. Wait for the process to exit on its own
 	if _, err := container.WaitStop(time.Duration(seconds) * time.Second); err != nil {
-		logrus.Infof("Container %v failed to exit within %d seconds of SIGTERM - using the force", container.ID, seconds)
+		logrus.Infof("Container %v failed to exit within %d seconds of signal %d - using the force", container.ID, seconds, stopSignal)
 		// 3. If it doesn't, then send SIGKILL
 		if err := daemon.Kill(container); err != nil {
 			container.WaitStop(-1 * time.Second)

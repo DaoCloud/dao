@@ -2,9 +2,9 @@ package distribution
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/Sirupsen/logrus"
+	"github.com/docker/distribution/digest"
 	"github.com/docker/docker/api"
 	"github.com/docker/docker/distribution/metadata"
 	"github.com/docker/docker/distribution/xfer"
@@ -19,7 +19,6 @@ import (
 // ImagePullConfig stores pull configuration.
 type ImagePullConfig struct {
 	// MetaHeaders stores HTTP headers with metadata about the image
-	// (DockerHeaders with prefix X-Meta- in the request).
 	MetaHeaders map[string][]string
 	// AuthConfig holds authentication credentials for authenticating with
 	// the registry.
@@ -29,7 +28,7 @@ type ImagePullConfig struct {
 	ProgressOutput progress.Output
 	// RegistryService is the registry service to use for TLS configuration
 	// and endpoint lookup.
-	RegistryService *registry.Service
+	RegistryService registry.Service
 	// ImageEventLogger notifies events for a given image
 	ImageEventLogger func(id, name, action string)
 	// MetadataStore is the storage backend for distribution-specific
@@ -86,11 +85,11 @@ func Pull(ctx context.Context, ref reference.Named, imagePullConfig *ImagePullCo
 	}
 
 	// makes sure name is not empty or `scratch`
-	if err := validateRepoName(repoInfo.Name()); err != nil {
+	if err := ValidateRepoName(repoInfo.Name()); err != nil {
 		return err
 	}
 
-	endpoints, err := imagePullConfig.RegistryService.LookupPullEndpoints(repoInfo)
+	endpoints, err := imagePullConfig.RegistryService.LookupPullEndpoints(repoInfo.Hostname())
 	if err != nil {
 		return err
 	}
@@ -99,7 +98,7 @@ func Pull(ctx context.Context, ref reference.Named, imagePullConfig *ImagePullCo
 		lastErr error
 
 		// discardNoSupportErrors is used to track whether an endpoint encountered an error of type registry.ErrNoSupport
-		// By default it is false, which means that if a ErrNoSupport error is encountered, it will be saved in lastErr.
+		// By default it is false, which means that if an ErrNoSupport error is encountered, it will be saved in lastErr.
 		// As soon as another kind of error is encountered, discardNoSupportErrors is set to true, avoiding the saving of
 		// any subsequent ErrNoSupport errors in lastErr.
 		// It's needed for pull-by-digest on v1 endpoints: if there are only v1 endpoints configured, the error should be
@@ -111,12 +110,25 @@ func Pull(ctx context.Context, ref reference.Named, imagePullConfig *ImagePullCo
 		// confirm that it was talking to a v2 registry. This will
 		// prevent fallback to the v1 protocol.
 		confirmedV2 bool
+
+		// confirmedTLSRegistries is a map indicating which registries
+		// are known to be using TLS. There should never be a plaintext
+		// retry for any of these.
+		confirmedTLSRegistries = make(map[string]struct{})
 	)
 	for _, endpoint := range endpoints {
 		if confirmedV2 && endpoint.Version == registry.APIVersion1 {
 			logrus.Debugf("Skipping v1 endpoint %s because v2 registry was detected", endpoint.URL)
 			continue
 		}
+
+		if endpoint.URL.Scheme != "https" {
+			if _, confirmedTLS := confirmedTLSRegistries[endpoint.URL.Host]; confirmedTLS {
+				logrus.Debugf("Skipping non-TLS endpoint %s for host/port that appears to use TLS", endpoint.URL)
+				continue
+			}
+		}
+
 		logrus.Debugf("Trying to pull %s from %s %s", repoInfo.Name(), endpoint.URL, endpoint.Version)
 
 		puller, err := newPuller(endpoint, repoInfo, imagePullConfig)
@@ -134,11 +146,14 @@ func Pull(ctx context.Context, ref reference.Named, imagePullConfig *ImagePullCo
 				if fallbackErr, ok := err.(fallbackError); ok {
 					fallback = true
 					confirmedV2 = confirmedV2 || fallbackErr.confirmedV2
+					if fallbackErr.transportOK && endpoint.URL.Scheme == "https" {
+						confirmedTLSRegistries[endpoint.URL.Host] = struct{}{}
+					}
 					err = fallbackErr.err
 				}
 			}
 			if fallback {
-				if _, ok := err.(registry.ErrNoSupport); !ok {
+				if _, ok := err.(ErrNoSupport); !ok {
 					// Because we found an error that's not ErrNoSupport, discard all subsequent ErrNoSupport errors.
 					discardNoSupportErrors = true
 					// append subsequent errors
@@ -149,9 +164,10 @@ func Pull(ctx context.Context, ref reference.Named, imagePullConfig *ImagePullCo
 					// append subsequent errors
 					lastErr = err
 				}
+				logrus.Errorf("Attempting next endpoint for pull after error: %v", err)
 				continue
 			}
-			logrus.Debugf("Not continuing with error: %v", err)
+			logrus.Errorf("Not continuing with pull after error: %v", err)
 			return err
 		}
 
@@ -178,8 +194,8 @@ func writeStatus(requestedTag string, out progress.Output, layersDownloaded bool
 	}
 }
 
-// validateRepoName validates the name of a repository.
-func validateRepoName(name string) error {
+// ValidateRepoName validates the name of a repository.
+func ValidateRepoName(name string) error {
 	if name == "" {
 		return fmt.Errorf("Repository name can't be empty")
 	}
@@ -189,15 +205,21 @@ func validateRepoName(name string) error {
 	return nil
 }
 
-// tmpFileClose creates a closer function for a temporary file that closes the file
-// and also deletes it.
-func tmpFileCloser(tmpFile *os.File) func() error {
-	return func() error {
-		tmpFile.Close()
-		if err := os.RemoveAll(tmpFile.Name()); err != nil {
-			logrus.Errorf("Failed to remove temp file: %s", tmpFile.Name())
-		}
-
-		return nil
+func addDigestReference(store reference.Store, ref reference.Named, dgst digest.Digest, imageID image.ID) error {
+	dgstRef, err := reference.WithDigest(ref, dgst)
+	if err != nil {
+		return err
 	}
+
+	if oldTagImageID, err := store.Get(dgstRef); err == nil {
+		if oldTagImageID != imageID {
+			// Updating digests not supported by reference store
+			logrus.Errorf("Image ID for digest %s changed from %s to %s, cannot update", dgst.String(), oldTagImageID, imageID)
+		}
+		return nil
+	} else if err != reference.ErrDoesNotExist {
+		return err
+	}
+
+	return store.AddDigest(dgstRef, imageID, true)
 }

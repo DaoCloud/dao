@@ -118,10 +118,6 @@ func (w *filePoller) Close() error {
 		w.remove(name)
 		delete(w.watches, name)
 	}
-	// channels will be closed by GC, we don't do it to avoid panic in send
-	// functions
-	// close(w.events)
-	// close(w.errors)
 	return nil
 }
 
@@ -148,6 +144,7 @@ func (w *filePoller) sendErr(e error, chClose <-chan struct{}) error {
 // watch is responsible for polling the specified file for changes
 // upon finding changes to a file or errors, sendEvent/sendErr is called
 func (w *filePoller) watch(f *os.File, lastFi os.FileInfo, chClose chan struct{}) {
+	defer f.Close()
 	for {
 		time.Sleep(watchWaitTime)
 		select {

@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -69,12 +71,32 @@ func TestCloneArgsStripFragment(t *testing.T) {
 	}
 }
 
+func gitGetConfig(name string) string {
+	b, err := git([]string{"config", "--get", name}...)
+	if err != nil {
+		// since we are interested in empty or non empty string,
+		// we can safely ignore the err here.
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
 func TestCheckoutGit(t *testing.T) {
 	root, err := ioutil.TempDir("", "docker-build-git-checkout")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(root)
+
+	autocrlf := gitGetConfig("core.autocrlf")
+	if !(autocrlf == "true" || autocrlf == "false" ||
+		autocrlf == "input" || autocrlf == "") {
+		t.Logf("unknown core.autocrlf value: \"%s\"", autocrlf)
+	}
+	eol := "\n"
+	if autocrlf == "true" {
+		eol = "\r\n"
+	}
 
 	gitDir := filepath.Join(root, "repo")
 	_, err = git("init", gitDir)
@@ -103,12 +125,14 @@ func TestCheckoutGit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err = os.Symlink("../subdir", filepath.Join(gitDir, "parentlink")); err != nil {
-		t.Fatal(err)
-	}
+	if runtime.GOOS != "windows" {
+		if err = os.Symlink("../subdir", filepath.Join(gitDir, "parentlink")); err != nil {
+			t.Fatal(err)
+		}
 
-	if err = os.Symlink("/subdir", filepath.Join(gitDir, "absolutelink")); err != nil {
-		t.Fatal(err)
+		if err = os.Symlink("/subdir", filepath.Join(gitDir, "absolutelink")); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	if _, err = gitWithinDir(gitDir, "add", "-A"); err != nil {
@@ -143,24 +167,34 @@ func TestCheckoutGit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cases := []struct {
+	type singleCase struct {
 		frag string
 		exp  string
 		fail bool
-	}{
+	}
+
+	cases := []singleCase{
 		{"", "FROM scratch", false},
 		{"master", "FROM scratch", false},
-		{":subdir", "FROM scratch\nEXPOSE 5000", false},
+		{":subdir", "FROM scratch" + eol + "EXPOSE 5000", false},
 		{":nosubdir", "", true},   // missing directory error
 		{":Dockerfile", "", true}, // not a directory error
 		{"master:nosubdir", "", true},
-		{"master:subdir", "FROM scratch\nEXPOSE 5000", false},
-		{"master:parentlink", "FROM scratch\nEXPOSE 5000", false},
-		{"master:absolutelink", "FROM scratch\nEXPOSE 5000", false},
+		{"master:subdir", "FROM scratch" + eol + "EXPOSE 5000", false},
 		{"master:../subdir", "", true},
-		{"test", "FROM scratch\nEXPOSE 3000", false},
-		{"test:", "FROM scratch\nEXPOSE 3000", false},
-		{"test:subdir", "FROM busybox\nEXPOSE 5000", false},
+		{"test", "FROM scratch" + eol + "EXPOSE 3000", false},
+		{"test:", "FROM scratch" + eol + "EXPOSE 3000", false},
+		{"test:subdir", "FROM busybox" + eol + "EXPOSE 5000", false},
+	}
+
+	if runtime.GOOS != "windows" {
+		// Windows GIT (2.7.1 x64) does not support parentlink/absolutelink. Sample output below
+		// 	git --work-tree .\repo --git-dir .\repo\.git add -A
+		//	error: readlink("absolutelink"): Function not implemented
+		// 	error: unable to index file absolutelink
+		// 	fatal: adding files failed
+		cases = append(cases, singleCase{frag: "master:absolutelink", exp: "FROM scratch" + eol + "EXPOSE 5000", fail: false})
+		cases = append(cases, singleCase{frag: "master:parentlink", exp: "FROM scratch" + eol + "EXPOSE 5000", fail: false})
 	}
 
 	for _, c := range cases {

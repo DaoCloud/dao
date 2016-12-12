@@ -6,7 +6,7 @@ import "github.com/docker/docker/layer"
 
 // RootFS describes images root filesystem
 // This is currently a placeholder that only supports layers. In the future
-// this can be made into a interface that supports different implementations.
+// this can be made into an interface that supports different implementations.
 type RootFS struct {
 	Type    string         `json:"type"`
 	DiffIDs []layer.DiffID `json:"diff_ids,omitempty"`
@@ -15,9 +15,4 @@ type RootFS struct {
 // ChainID returns the ChainID for the top layer in RootFS.
 func (r *RootFS) ChainID() layer.ChainID {
 	return layer.CreateChainID(r.DiffIDs)
-}
-
-// NewRootFS returns empty RootFS struct
-func NewRootFS() *RootFS {
-	return &RootFS{Type: "layers"}
 }

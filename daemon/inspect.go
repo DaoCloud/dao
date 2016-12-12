@@ -4,29 +4,31 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/docker/docker/api/types/backend"
 	"github.com/docker/docker/container"
-	"github.com/docker/docker/daemon/exec"
 	"github.com/docker/docker/daemon/network"
-	"github.com/docker/docker/pkg/version"
 	"github.com/docker/engine-api/types"
 	networktypes "github.com/docker/engine-api/types/network"
+	"github.com/docker/engine-api/types/versions"
 	"github.com/docker/engine-api/types/versions/v1p20"
 )
 
 // ContainerInspect returns low-level information about a
 // container. Returns an error if the container cannot be found, or if
 // there is an error getting the data.
-func (daemon *Daemon) ContainerInspect(name string, size bool, version version.Version) (interface{}, error) {
+func (daemon *Daemon) ContainerInspect(name string, size bool, version string) (interface{}, error) {
 	switch {
-	case version.LessThan("1.20"):
+	case versions.LessThan(version, "1.20"):
 		return daemon.containerInspectPre120(name)
-	case version.Equal("1.20"):
+	case versions.Equal(version, "1.20"):
 		return daemon.containerInspect120(name)
 	}
-	return daemon.containerInspectCurrent(name, size)
+	return daemon.ContainerInspectCurrent(name, size)
 }
 
-func (daemon *Daemon) containerInspectCurrent(name string, size bool) (*types.ContainerJSON, error) {
+// ContainerInspectCurrent returns low-level information about a
+// container in a most recent api version.
+func (daemon *Daemon) ContainerInspectCurrent(name string, size bool) (*types.ContainerJSON, error) {
 	container, err := daemon.GetContainer(name)
 	if err != nil {
 		return nil, err
@@ -108,14 +110,13 @@ func (daemon *Daemon) getInspectData(container *container.Container, size bool) 
 		hostConfig.Links = append(hostConfig.Links, fmt.Sprintf("%s:%s", child.Name, linkAlias))
 	}
 
-	// we need this trick to preserve empty log driver, so
-	// container will use daemon defaults even if daemon change them
-	if hostConfig.LogConfig.Type == "" {
-		hostConfig.LogConfig.Type = daemon.defaultLogConfig.Type
-	}
-
-	if len(hostConfig.LogConfig.Config) == 0 {
-		hostConfig.LogConfig.Config = daemon.defaultLogConfig.Config
+	var containerHealth *types.Health
+	if container.State.Health != nil {
+		containerHealth = &types.Health{
+			Status:        container.State.Health.Status,
+			FailingStreak: container.State.Health.FailingStreak,
+			Log:           append([]*types.HealthcheckResult{}, container.State.Health.Log...),
+		}
 	}
 
 	containerState := &types.ContainerState{
@@ -126,10 +127,11 @@ func (daemon *Daemon) getInspectData(container *container.Container, size bool) 
 		OOMKilled:  container.State.OOMKilled,
 		Dead:       container.State.Dead,
 		Pid:        container.State.Pid,
-		ExitCode:   container.State.ExitCode,
-		Error:      container.State.Error,
+		ExitCode:   container.State.ExitCode(),
+		Error:      container.State.Error(),
 		StartedAt:  container.State.StartedAt.Format(time.RFC3339Nano),
 		FinishedAt: container.State.FinishedAt.Format(time.RFC3339Nano),
+		Health:     containerHealth,
 	}
 
 	contJSONBase := &types.ContainerJSONBase{
@@ -175,12 +177,26 @@ func (daemon *Daemon) getInspectData(container *container.Container, size bool) 
 
 // ContainerExecInspect returns low-level information about the exec
 // command. An error is returned if the exec cannot be found.
-func (daemon *Daemon) ContainerExecInspect(id string) (*exec.Config, error) {
-	eConfig, err := daemon.getExecConfig(id)
+func (daemon *Daemon) ContainerExecInspect(id string) (*backend.ExecInspect, error) {
+	e, err := daemon.getExecConfig(id)
 	if err != nil {
 		return nil, err
 	}
-	return eConfig, nil
+
+	pc := inspectExecProcessConfig(e)
+
+	return &backend.ExecInspect{
+		ID:            e.ID,
+		Running:       e.Running,
+		ExitCode:      e.ExitCode,
+		ProcessConfig: pc,
+		OpenStdin:     e.OpenStdin,
+		OpenStdout:    e.OpenStdout,
+		OpenStderr:    e.OpenStderr,
+		CanRemove:     e.CanRemove,
+		ContainerID:   e.ContainerID,
+		DetachKeys:    e.DetachKeys,
+	}, nil
 }
 
 // VolumeInspect looks up a volume by name. An error is returned if
@@ -190,7 +206,10 @@ func (daemon *Daemon) VolumeInspect(name string) (*types.Volume, error) {
 	if err != nil {
 		return nil, err
 	}
-	return volumeToAPIType(v), nil
+	apiV := volumeToAPIType(v)
+	apiV.Mountpoint = v.Path()
+	apiV.Status = v.Status()
+	return apiV, nil
 }
 
 func (daemon *Daemon) getBackwardsCompatibleNetworkSettings(settings *network.Settings) *v1p20.NetworkSettings {

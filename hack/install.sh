@@ -20,10 +20,19 @@ set -e
 #   To update this script on https://get.docker.com,
 #   use hack/release.sh during a normal release,
 #   or the following one-liner for script hotfixes:
-#     s3cmd put --acl-public -P hack/install.sh s3://get.docker.com/index
+#     aws s3 cp --acl public-read hack/install.sh s3://get.docker.com/index
 #
 
-url='https://get.docker.com/'
+url="https://get.docker.com/"
+apt_url="https://apt.dockerproject.org"
+yum_url="https://yum.dockerproject.org"
+gpg_fingerprint="58118E89F3A912897C070ADBF76221572C52609D"
+
+key_servers="
+ha.pool.sks-keyservers.net
+pgp.mit.edu
+keyserver.ubuntu.com
+"
 
 command_exists() {
 	command -v "$@" > /dev/null 2>&1
@@ -78,7 +87,7 @@ check_forked() {
 			Upstream release is '$lsb_dist' version '$dist_version'.
 			EOF
 		else
-			if [ -r /etc/debian_version ] && [ "$lsb_dist" != "ubuntu" ]; then
+			if [ -r /etc/debian_version ] && [ "$lsb_dist" != "ubuntu" ] && [ "$lsb_dist" != "raspbian" ]; then
 				# We're Debian and don't even know it!
 				lsb_dist=debian
 				dist_version="$(cat /etc/debian_version | sed 's/\/.*//' | sed 's/\..*//')"
@@ -99,7 +108,10 @@ rpm_import_repository_key() {
 	local key=$1; shift
 	local tmpdir=$(mktemp -d)
 	chmod 600 "$tmpdir"
-	gpg --homedir "$tmpdir" --keyserver ha.pool.sks-keyservers.net --recv-keys "$key"
+	for key_server in $key_servers ; do
+		gpg --homedir "$tmpdir" --keyserver "$key_server" --recv-keys "$key" && break
+	done
+	gpg --homedir "$tmpdir" -k "$key" >/dev/null
 	gpg --homedir "$tmpdir" --export --armor "$key" > "$tmpdir"/repo.key
 	rpm --import "$tmpdir"/repo.key
 	rm -rf "$tmpdir"
@@ -117,10 +129,12 @@ do_install() {
 	case "$(uname -m)" in
 		*64)
 			;;
+		armv6l|armv7l)
+			;;
 		*)
 			cat >&2 <<-'EOF'
-			Error: you are not using a 64bit platform.
-			Docker currently only supports 64bit platforms.
+			Error: you are not using a 64bit platform or a Raspberry Pi (armv6l/armv7l).
+			Docker currently only supports 64bit platforms or a Raspberry Pi (armv6l/armv7l).
 			EOF
 			exit 1
 			;;
@@ -200,11 +214,13 @@ do_install() {
 	fi
 
 	# check to see which repo they are trying to install from
-	repo='main'
-	if [ "https://test.docker.com/" = "$url" ]; then
-		repo='testing'
-	elif [ "https://experimental.docker.com/" = "$url" ]; then
-		repo='experimental'
+	if [ -z "$repo" ]; then
+		repo='main'
+		if [ "https://test.docker.com/" = "$url" ]; then
+			repo='testing'
+		elif [ "https://experimental.docker.com/" = "$url" ]; then
+			repo='experimental'
+		fi
 	fi
 
 	# perform some very rudimentary platform detection
@@ -225,16 +241,23 @@ do_install() {
 	if [ -z "$lsb_dist" ] && [ -r /etc/oracle-release ]; then
 		lsb_dist='oracleserver'
 	fi
-	if [ -z "$lsb_dist" ]; then
-		if [ -r /etc/centos-release ] || [ -r /etc/redhat-release ]; then
-			lsb_dist='centos'
-		fi
+	if [ -z "$lsb_dist" ] && [ -r /etc/centos-release ]; then
+		lsb_dist='centos'
+	fi
+	if [ -z "$lsb_dist" ] && [ -r /etc/redhat-release ]; then
+		lsb_dist='redhat'
 	fi
 	if [ -z "$lsb_dist" ] && [ -r /etc/os-release ]; then
 		lsb_dist="$(. /etc/os-release && echo "$ID")"
 	fi
 
 	lsb_dist="$(echo "$lsb_dist" | tr '[:upper:]' '[:lower:]')"
+
+	# Special case redhatenterpriseserver
+	if [ "${lsb_dist}" = "redhatenterpriseserver" ]; then
+        	# Set it to redhat, it will be changed to centos below anyways
+        	lsb_dist='redhat'
+	fi
 
 	case "$lsb_dist" in
 
@@ -247,7 +270,7 @@ do_install() {
 			fi
 		;;
 
-		debian)
+		debian|raspbian)
 			dist_version="$(cat /etc/debian_version | sed 's/\/.*//' | sed 's/\..*//')"
 			case "$dist_version" in
 				8)
@@ -265,8 +288,8 @@ do_install() {
 			dist_version="$(rpm -q --whatprovides redhat-release --queryformat "%{VERSION}\n" | sed 's/\/.*//' | sed 's/\..*//' | sed 's/Server*//')"
 		;;
 
-		fedora|centos)
-			dist_version="$(rpm -q --whatprovides redhat-release --queryformat "%{VERSION}\n" | sed 's/\/.*//' | sed 's/\..*//' | sed 's/Server*//')"
+		fedora|centos|redhat)
+			dist_version="$(rpm -q --whatprovides ${lsb_dist}-release --queryformat "%{VERSION}\n" | sed 's/\/.*//' | sed 's/\..*//' | sed 's/Server*//' | sort | tail -1)"
 		;;
 
 		*)
@@ -354,7 +377,7 @@ do_install() {
 			exit 0
 			;;
 
-		ubuntu|debian)
+		ubuntu|debian|raspbian)
 			export DEBIAN_FRONTEND=noninteractive
 
 			did_apt_get_update=
@@ -365,24 +388,30 @@ do_install() {
 				fi
 			}
 
-			# aufs is preferred over devicemapper; try to ensure the driver is available.
-			if ! grep -q aufs /proc/filesystems && ! $sh_c 'modprobe aufs'; then
-				if uname -r | grep -q -- '-generic' && dpkg -l 'linux-image-*-generic' | grep -qE '^ii|^hi' 2>/dev/null; then
-					kern_extras="linux-image-extra-$(uname -r) linux-image-extra-virtual"
+			if [ "$lsb_dist" = "raspbian" ]; then
+				# Create Raspbian specific systemd drop-in file, use overlay by default
+				( set -x; $sh_c "mkdir -p /etc/systemd/system/docker.service.d" )
+				( set -x; $sh_c "echo '[Service]\nExecStart=\nExecStart=/usr/bin/dockerd --storage-driver overlay -H fd://' > /etc/systemd/system/docker.service.d/overlay.conf" )
+			else
+				# aufs is preferred over devicemapper; try to ensure the driver is available.
+				if ! grep -q aufs /proc/filesystems && ! $sh_c 'modprobe aufs'; then
+					if uname -r | grep -q -- '-generic' && dpkg -l 'linux-image-*-generic' | grep -qE '^ii|^hi' 2>/dev/null; then
+						kern_extras="linux-image-extra-$(uname -r) linux-image-extra-virtual"
 
-					apt_get_update
-					( set -x; $sh_c 'sleep 3; apt-get install -y -q '"$kern_extras" ) || true
+						apt_get_update
+						( set -x; $sh_c 'sleep 3; apt-get install -y -q '"$kern_extras" ) || true
 
-					if ! grep -q aufs /proc/filesystems && ! $sh_c 'modprobe aufs'; then
-						echo >&2 'Warning: tried to install '"$kern_extras"' (for AUFS)'
-						echo >&2 ' but we still have no AUFS.  Docker may not work. Proceeding anyways!'
+						if ! grep -q aufs /proc/filesystems && ! $sh_c 'modprobe aufs'; then
+							echo >&2 'Warning: tried to install '"$kern_extras"' (for AUFS)'
+							echo >&2 ' but we still have no AUFS.  Docker may not work. Proceeding anyways!'
+							( set -x; sleep 10 )
+						fi
+					else
+						echo >&2 'Warning: current kernel is not supported by the linux-image-extra-virtual'
+						echo >&2 ' package.  We have no AUFS support.  Consider installing the packages'
+						echo >&2 ' linux-image-virtual kernel and linux-image-extra-virtual for AUFS support.'
 						( set -x; sleep 10 )
 					fi
-				else
-					echo >&2 'Warning: current kernel is not supported by the linux-image-extra-virtual'
-					echo >&2 ' package.  We have no AUFS support.  Consider installing the packages'
-					echo >&2 ' linux-image-virtual kernel and linux-image-extra-virtual for AUFS support.'
-					( set -x; sleep 10 )
 				fi
 			fi
 
@@ -392,7 +421,7 @@ do_install() {
 				if command -v apparmor_parser >/dev/null 2>&1; then
 					echo 'apparmor is enabled in the kernel and apparmor utils were already installed'
 				else
-					echo 'apparmor is enabled in the kernel, but apparmor_parser missing'
+					echo 'apparmor is enabled in the kernel, but apparmor_parser is missing. Trying to install it..'
 					apt_get_update
 					( set -x; $sh_c 'sleep 3; apt-get install -y -q apparmor' )
 				fi
@@ -407,25 +436,37 @@ do_install() {
 				( set -x; $sh_c 'sleep 3; apt-get install -y -q curl ca-certificates' )
 				curl='curl -sSL'
 			fi
+			if [ ! -e /usr/bin/gpg ]; then
+				apt_get_update
+				( set -x; $sh_c 'sleep 3; apt-get install -y -q gnupg2 || apt-get install -y -q gnupg' )
+			fi
+
 			(
 			set -x
-			$sh_c "apt-key adv --keyserver hkp://p80.pool.sks-keyservers.net:80 --recv-keys 58118E89F3A912897C070ADBF76221572C52609D"
+			for key_server in $key_servers ; do
+				$sh_c "apt-key adv --keyserver hkp://${key_server}:80 --recv-keys ${gpg_fingerprint}" && break
+			done
+			$sh_c "apt-key adv -k ${gpg_fingerprint} >/dev/null"
 			$sh_c "mkdir -p /etc/apt/sources.list.d"
-			$sh_c "echo deb [arch=$(dpkg --print-architecture)] https://apt.dockerproject.org/repo ${lsb_dist}-${dist_version} ${repo} > /etc/apt/sources.list.d/docker.list"
+			$sh_c "echo deb \[arch=$(dpkg --print-architecture)\] ${apt_url}/repo ${lsb_dist}-${dist_version} ${repo} > /etc/apt/sources.list.d/docker.list"
 			$sh_c 'sleep 3; apt-get update; apt-get install -y -q docker-engine'
 			)
 			echo_docker_as_nonroot
 			exit 0
 			;;
 
-		fedora|centos|oraclelinux)
+		fedora|centos|redhat|oraclelinux)
+			if [ "${lsb_dist}" = "redhat" ]; then
+				# we use the centos repository for both redhat and centos releases
+				lsb_dist='centos'
+			fi
 			$sh_c "cat >/etc/yum.repos.d/docker-${repo}.repo" <<-EOF
 			[docker-${repo}-repo]
 			name=Docker ${repo} Repository
-			baseurl=https://yum.dockerproject.org/repo/${repo}/${lsb_dist}/${dist_version}
+			baseurl=${yum_url}/repo/${repo}/${lsb_dist}/${dist_version}
 			enabled=1
 			gpgcheck=1
-			gpgkey=https://yum.dockerproject.org/gpg
+			gpgkey=${yum_url}/gpg
 			EOF
 			if [ "$lsb_dist" = "fedora" ] && [ "$dist_version" -ge "22" ]; then
 				(

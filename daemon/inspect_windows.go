@@ -1,7 +1,9 @@
 package daemon
 
 import (
+	"github.com/docker/docker/api/types/backend"
 	"github.com/docker/docker/container"
+	"github.com/docker/docker/daemon/exec"
 	"github.com/docker/engine-api/types"
 )
 
@@ -26,5 +28,13 @@ func addMountPoints(container *container.Container) []types.MountPoint {
 
 // containerInspectPre120 get containers for pre 1.20 APIs.
 func (daemon *Daemon) containerInspectPre120(name string) (*types.ContainerJSON, error) {
-	return daemon.containerInspectCurrent(name, false)
+	return daemon.ContainerInspectCurrent(name, false)
+}
+
+func inspectExecProcessConfig(e *exec.Config) *backend.ExecProcessConfig {
+	return &backend.ExecProcessConfig{
+		Tty:        e.Tty,
+		Entrypoint: e.Entrypoint,
+		Arguments:  e.Args,
+	}
 }

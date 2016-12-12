@@ -8,15 +8,12 @@ import (
 	"sync"
 
 	"github.com/Sirupsen/logrus"
+	"github.com/docker/notary"
 	"github.com/docker/notary/passphrase"
 	"github.com/docker/notary/tuf/data"
 )
 
-const (
-	rootKeysSubdir    = "root_keys"
-	nonRootKeysSubdir = "tuf_keys"
-	privDir           = "private"
-)
+type keyInfoMap map[string]KeyInfo
 
 // KeyFileStore persists and manages private keys on disk
 type KeyFileStore struct {
@@ -24,6 +21,7 @@ type KeyFileStore struct {
 	SimpleFileStore
 	passphrase.Retriever
 	cachedKeys map[string]*cachedKey
+	keyInfoMap
 }
 
 // KeyMemoryStore manages private keys in memory
@@ -32,21 +30,112 @@ type KeyMemoryStore struct {
 	MemoryFileStore
 	passphrase.Retriever
 	cachedKeys map[string]*cachedKey
+	keyInfoMap
+}
+
+// KeyInfo stores the role, path, and gun for a corresponding private key ID
+// It is assumed that each private key ID is unique
+type KeyInfo struct {
+	Gun  string
+	Role string
 }
 
 // NewKeyFileStore returns a new KeyFileStore creating a private directory to
 // hold the keys.
 func NewKeyFileStore(baseDir string, passphraseRetriever passphrase.Retriever) (*KeyFileStore, error) {
-	baseDir = filepath.Join(baseDir, privDir)
+	baseDir = filepath.Join(baseDir, notary.PrivDir)
 	fileStore, err := NewPrivateSimpleFileStore(baseDir, keyExtension)
 	if err != nil {
 		return nil, err
 	}
 	cachedKeys := make(map[string]*cachedKey)
+	keyInfoMap := make(keyInfoMap)
 
-	return &KeyFileStore{SimpleFileStore: *fileStore,
+	keyStore := &KeyFileStore{SimpleFileStore: *fileStore,
 		Retriever:  passphraseRetriever,
-		cachedKeys: cachedKeys}, nil
+		cachedKeys: cachedKeys,
+		keyInfoMap: keyInfoMap,
+	}
+
+	// Load this keystore's ID --> gun/role map
+	keyStore.loadKeyInfo()
+	return keyStore, nil
+}
+
+func generateKeyInfoMap(s Storage) map[string]KeyInfo {
+	keyInfoMap := make(map[string]KeyInfo)
+	for _, keyPath := range s.ListFiles() {
+		d, err := s.Get(keyPath)
+		if err != nil {
+			logrus.Error(err)
+			continue
+		}
+		keyID, keyInfo, err := KeyInfoFromPEM(d, keyPath)
+		if err != nil {
+			logrus.Error(err)
+			continue
+		}
+		keyInfoMap[keyID] = keyInfo
+	}
+	return keyInfoMap
+}
+
+// Attempts to infer the keyID, role, and GUN from the specified key path.
+// Note that non-root roles can only be inferred if this is a legacy style filename: KEYID_ROLE.key
+func inferKeyInfoFromKeyPath(keyPath string) (string, string, string) {
+	var keyID, role, gun string
+	keyID = filepath.Base(keyPath)
+	underscoreIndex := strings.LastIndex(keyID, "_")
+
+	// This is the legacy KEYID_ROLE filename
+	// The keyID is the first part of the keyname
+	// The keyRole is the second part of the keyname
+	// in a key named abcde_root, abcde is the keyID and root is the KeyAlias
+	if underscoreIndex != -1 {
+		role = keyID[underscoreIndex+1:]
+		keyID = keyID[:underscoreIndex]
+	}
+
+	if filepath.HasPrefix(keyPath, notary.RootKeysSubdir+"/") {
+		return keyID, data.CanonicalRootRole, ""
+	}
+
+	keyPath = strings.TrimPrefix(keyPath, notary.NonRootKeysSubdir+"/")
+	gun = getGunFromFullID(keyPath)
+	return keyID, role, gun
+}
+
+func getGunFromFullID(fullKeyID string) string {
+	keyGun := filepath.Dir(fullKeyID)
+	// If the gun is empty, Dir will return .
+	if keyGun == "." {
+		keyGun = ""
+	}
+	return keyGun
+}
+
+func (s *KeyFileStore) loadKeyInfo() {
+	s.keyInfoMap = generateKeyInfoMap(s)
+}
+
+func (s *KeyMemoryStore) loadKeyInfo() {
+	s.keyInfoMap = generateKeyInfoMap(s)
+}
+
+// GetKeyInfo returns the corresponding gun and role key info for a keyID
+func (s *KeyFileStore) GetKeyInfo(keyID string) (KeyInfo, error) {
+	if info, ok := s.keyInfoMap[keyID]; ok {
+		return info, nil
+	}
+	return KeyInfo{}, fmt.Errorf("Could not find info for keyID %s", keyID)
+}
+
+// GetKeyInfo returns the corresponding gun and role key info for a keyID
+func (s *KeyMemoryStore) GetKeyInfo(keyID string) (KeyInfo, error) {
+	if info, ok := s.keyInfoMap[keyID]; ok {
+		return info, nil
+	}
+	return KeyInfo{}, fmt.Errorf("Could not find info for keyID %s", keyID)
 }
 
 // Name returns a user friendly name for the location this store
@@ -56,45 +145,63 @@ func (s *KeyFileStore) Name() string {
 }
 
 // AddKey stores the contents of a PEM-encoded private key as a PEM block
-func (s *KeyFileStore) AddKey(name, role string, privKey data.PrivateKey) error {
+func (s *KeyFileStore) AddKey(keyInfo KeyInfo, privKey data.PrivateKey) error {
 	s.Lock()
 	defer s.Unlock()
-	return addKey(s, s.Retriever, s.cachedKeys, name, role, privKey)
+	if keyInfo.Role == data.CanonicalRootRole || data.IsDelegation(keyInfo.Role) || !data.ValidRole(keyInfo.Role) {
+		keyInfo.Gun = ""
+	}
+	err := addKey(s, s.Retriever, s.cachedKeys, filepath.Join(keyInfo.Gun, privKey.ID()), keyInfo.Role, privKey)
+	if err != nil {
+		return err
+	}
+	s.keyInfoMap[privKey.ID()] = keyInfo
+	return nil
 }
 
 // GetKey returns the PrivateKey given a KeyID
 func (s *KeyFileStore) GetKey(name string) (data.PrivateKey, string, error) {
 	s.Lock()
 	defer s.Unlock()
+	// If this is a bare key ID without the gun, prepend the gun so the filestore lookup succeeds
+	if keyInfo, ok := s.keyInfoMap[name]; ok {
+		name = filepath.Join(keyInfo.Gun, name)
+	}
 	return getKey(s, s.Retriever, s.cachedKeys, name)
 }
 
-// ListKeys returns a list of unique PublicKeys present on the KeyFileStore.
-func (s *KeyFileStore) ListKeys() map[string]string {
-	return listKeys(s)
+// ListKeys returns a list of unique PublicKeys present on the KeyFileStore, by returning a copy of the keyInfoMap
+func (s *KeyFileStore) ListKeys() map[string]KeyInfo {
+	return copyKeyInfoMap(s.keyInfoMap)
 }
 
 // RemoveKey removes the key from the keyfilestore
-func (s *KeyFileStore) RemoveKey(name string) error {
+func (s *KeyFileStore) RemoveKey(keyID string) error {
 	s.Lock()
 	defer s.Unlock()
-	return removeKey(s, s.cachedKeys, name)
+	// If this is a bare key ID without the gun, prepend the gun so the filestore lookup succeeds
+	if keyInfo, ok := s.keyInfoMap[keyID]; ok {
+		keyID = filepath.Join(keyInfo.Gun, keyID)
+	}
+	err := removeKey(s, s.cachedKeys, keyID)
+	if err != nil {
+		return err
+	}
+	// Remove this key from our keyInfo map if we removed from our filesystem
+	delete(s.keyInfoMap, filepath.Base(keyID))
+	return nil
 }
 
-// ExportKey exportes the encrypted bytes from the keystore and writes it to
-// dest.
-func (s *KeyFileStore) ExportKey(name string) ([]byte, error) {
-	keyBytes, _, err := getRawKey(s, name)
+// ExportKey exports the encrypted bytes from the keystore
+func (s *KeyFileStore) ExportKey(keyID string) ([]byte, error) {
+	if keyInfo, ok := s.keyInfoMap[keyID]; ok {
+		keyID = filepath.Join(keyInfo.Gun, keyID)
+	}
+	keyBytes, _, err := getRawKey(s, keyID)
 	if err != nil {
 		return nil, err
 	}
 	return keyBytes, nil
-}
-
-// ImportKey imports the private key in the encrypted bytes into the keystore
-// with the given key ID and alias.
-func (s *KeyFileStore) ImportKey(pemBytes []byte, alias string) error {
-	return importKey(s, s.Retriever, s.cachedKeys, alias, pemBytes)
 }
 
 // NewKeyMemoryStore returns a new KeyMemoryStore which holds keys in memory
@@ -102,9 +209,17 @@ func NewKeyMemoryStore(passphraseRetriever passphrase.Retriever) *KeyMemoryStore
 	memStore := NewMemoryFileStore()
 	cachedKeys := make(map[string]*cachedKey)
 
-	return &KeyMemoryStore{MemoryFileStore: *memStore,
+	keyInfoMap := make(keyInfoMap)
+
+	keyStore := &KeyMemoryStore{MemoryFileStore: *memStore,
 		Retriever:  passphraseRetriever,
-		cachedKeys: cachedKeys}
+		cachedKeys: cachedKeys,
+		keyInfoMap: keyInfoMap,
+	}
+
+	// Load this keystore's ID --> gun/role map
+	keyStore.loadKeyInfo()
+	return keyStore
 }
 
 // Name returns a user friendly name for the location this store
@@ -114,48 +229,87 @@ func (s *KeyMemoryStore) Name() string {
 }
 
 // AddKey stores the contents of a PEM-encoded private key as a PEM block
-func (s *KeyMemoryStore) AddKey(name, alias string, privKey data.PrivateKey) error {
+func (s *KeyMemoryStore) AddKey(keyInfo KeyInfo, privKey data.PrivateKey) error {
 	s.Lock()
 	defer s.Unlock()
-	return addKey(s, s.Retriever, s.cachedKeys, name, alias, privKey)
+	if keyInfo.Role == data.CanonicalRootRole || data.IsDelegation(keyInfo.Role) || !data.ValidRole(keyInfo.Role) {
+		keyInfo.Gun = ""
+	}
+	err := addKey(s, s.Retriever, s.cachedKeys, filepath.Join(keyInfo.Gun, privKey.ID()), keyInfo.Role, privKey)
+	if err != nil {
+		return err
+	}
+	s.keyInfoMap[privKey.ID()] = keyInfo
+	return nil
 }
 
 // GetKey returns the PrivateKey given a KeyID
 func (s *KeyMemoryStore) GetKey(name string) (data.PrivateKey, string, error) {
 	s.Lock()
 	defer s.Unlock()
+	// If this is a bare key ID without the gun, prepend the gun so the filestore lookup succeeds
+	if keyInfo, ok := s.keyInfoMap[name]; ok {
+		name = filepath.Join(keyInfo.Gun, name)
+	}
 	return getKey(s, s.Retriever, s.cachedKeys, name)
 }
 
-// ListKeys returns a list of unique PublicKeys present on the KeyFileStore.
-func (s *KeyMemoryStore) ListKeys() map[string]string {
-	return listKeys(s)
+// ListKeys returns a list of unique PublicKeys present on the KeyFileStore, by returning a copy of the keyInfoMap
+func (s *KeyMemoryStore) ListKeys() map[string]KeyInfo {
+	return copyKeyInfoMap(s.keyInfoMap)
+}
+
+// copyKeyInfoMap returns a deep copy of the passed-in keyInfoMap
+func copyKeyInfoMap(keyInfoMap map[string]KeyInfo) map[string]KeyInfo {
+	copyMap := make(map[string]KeyInfo)
+	for keyID, keyInfo := range keyInfoMap {
+		copyMap[keyID] = KeyInfo{Role: keyInfo.Role, Gun: keyInfo.Gun}
+	}
+	return copyMap
 }
 
 // RemoveKey removes the key from the keystore
-func (s *KeyMemoryStore) RemoveKey(name string) error {
+func (s *KeyMemoryStore) RemoveKey(keyID string) error {
 	s.Lock()
 	defer s.Unlock()
-	return removeKey(s, s.cachedKeys, name)
+	// If this is a bare key ID without the gun, prepend the gun so the filestore lookup succeeds
+	if keyInfo, ok := s.keyInfoMap[keyID]; ok {
+		keyID = filepath.Join(keyInfo.Gun, keyID)
+	}
+	err := removeKey(s, s.cachedKeys, keyID)
+	if err != nil {
+		return err
+	}
+	// Remove this key from our keyInfo map if we removed from our filesystem
+	delete(s.keyInfoMap, filepath.Base(keyID))
+	return nil
 }
 
-// ExportKey exportes the encrypted bytes from the keystore and writes it to
-// dest.
-func (s *KeyMemoryStore) ExportKey(name string) ([]byte, error) {
-	keyBytes, _, err := getRawKey(s, name)
+// ExportKey exports the encrypted bytes from the keystore
+func (s *KeyMemoryStore) ExportKey(keyID string) ([]byte, error) {
+	keyBytes, _, err := getRawKey(s, keyID)
 	if err != nil {
 		return nil, err
 	}
 	return keyBytes, nil
 }
 
-// ImportKey imports the private key in the encrypted bytes into the keystore
-// with the given key ID and alias.
-func (s *KeyMemoryStore) ImportKey(pemBytes []byte, alias string) error {
-	return importKey(s, s.Retriever, s.cachedKeys, alias, pemBytes)
+// KeyInfoFromPEM attempts to get a keyID and KeyInfo from the filename and PEM bytes of a key
+func KeyInfoFromPEM(pemBytes []byte, filename string) (string, KeyInfo, error) {
+	keyID, role, gun := inferKeyInfoFromKeyPath(filename)
+	if role == "" {
+		block, _ := pem.Decode(pemBytes)
+		if block == nil {
+			return "", KeyInfo{}, fmt.Errorf("could not decode PEM block for key %s", filename)
+		}
+		if keyRole, ok := block.Headers["role"]; ok {
+			role = keyRole
+		}
+	}
+	return keyID, KeyInfo{Gun: gun, Role: role}, nil
 }
 
-func addKey(s LimitedFileStore, passphraseRetriever passphrase.Retriever, cachedKeys map[string]*cachedKey, name, role string, privKey data.PrivateKey) error {
+func addKey(s Storage, passphraseRetriever passphrase.Retriever, cachedKeys map[string]*cachedKey, name, role string, privKey data.PrivateKey) error {
 
 	var (
 		chosenPassphrase string
@@ -184,7 +338,7 @@ func addKey(s LimitedFileStore, passphraseRetriever passphrase.Retriever, cached
 // both in the newer format PEM headers, and also in the legacy filename
 // format. It returns: the role, whether it was found in the legacy format
 // (true == legacy), and an error
-func getKeyRole(s LimitedFileStore, keyID string) (string, bool, error) {
+func getKeyRole(s Storage, keyID string) (string, bool, error) {
 	name := strings.TrimSpace(strings.TrimSuffix(filepath.Base(keyID), filepath.Ext(keyID)))
 
 	for _, file := range s.ListFiles() {
@@ -207,11 +361,11 @@ func getKeyRole(s LimitedFileStore, keyID string) (string, bool, error) {
 		}
 	}
 
-	return "", false, &ErrKeyNotFound{KeyID: keyID}
+	return "", false, ErrKeyNotFound{KeyID: keyID}
 }
 
 // GetKey returns the PrivateKey given a KeyID
-func getKey(s LimitedFileStore, passphraseRetriever passphrase.Retriever, cachedKeys map[string]*cachedKey, name string) (data.PrivateKey, string, error) {
+func getKey(s Storage, passphraseRetriever passphrase.Retriever, cachedKeys map[string]*cachedKey, name string) (data.PrivateKey, string, error) {
 	cachedKeyEntry, ok := cachedKeys[name]
 	if ok {
 		return cachedKeyEntry.key, cachedKeyEntry.alias, nil
@@ -234,52 +388,8 @@ func getKey(s LimitedFileStore, passphraseRetriever passphrase.Retriever, cached
 	return privKey, keyAlias, nil
 }
 
-// ListKeys returns a map of unique PublicKeys present on the KeyFileStore and
-// their corresponding aliases.
-func listKeys(s LimitedFileStore) map[string]string {
-	keyIDMap := make(map[string]string)
-
-	for _, f := range s.ListFiles() {
-		// Remove the prefix of the directory from the filename
-		var keyIDFull string
-		if strings.HasPrefix(f, rootKeysSubdir+"/") {
-			keyIDFull = strings.TrimPrefix(f, rootKeysSubdir+"/")
-		} else {
-			keyIDFull = strings.TrimPrefix(f, nonRootKeysSubdir+"/")
-		}
-
-		keyIDFull = strings.TrimSpace(keyIDFull)
-
-		// If the key does not have a _, we'll attempt to
-		// read it as a PEM
-		underscoreIndex := strings.LastIndex(keyIDFull, "_")
-		if underscoreIndex == -1 {
-			d, err := s.Get(f)
-			if err != nil {
-				logrus.Error(err)
-				continue
-			}
-			block, _ := pem.Decode(d)
-			if block == nil {
-				continue
-			}
-			if role, ok := block.Headers["role"]; ok {
-				keyIDMap[keyIDFull] = role
-			}
-		} else {
-			// The keyID is the first part of the keyname
-			// The KeyAlias is the second part of the keyname
-			// in a key named abcde_root, abcde is the keyID and root is the KeyAlias
-			keyID := keyIDFull[:underscoreIndex]
-			keyAlias := keyIDFull[underscoreIndex+1:]
-			keyIDMap[keyID] = keyAlias
-		}
-	}
-	return keyIDMap
-}
-
 // RemoveKey removes the key from the keyfilestore
-func removeKey(s LimitedFileStore, cachedKeys map[string]*cachedKey, name string) error {
+func removeKey(s Storage, cachedKeys map[string]*cachedKey, name string) error {
 	role, legacy, err := getKeyRole(s, name)
 	if err != nil {
 		return err
@@ -301,15 +411,15 @@ func removeKey(s LimitedFileStore, cachedKeys map[string]*cachedKey, name string
 
 // Assumes 2 subdirectories, 1 containing root keys and 1 containing tuf keys
 func getSubdir(alias string) string {
-	if alias == "root" {
-		return rootKeysSubdir
+	if alias == data.CanonicalRootRole {
+		return notary.RootKeysSubdir
 	}
-	return nonRootKeysSubdir
+	return notary.NonRootKeysSubdir
 }
 
 // Given a key ID, gets the bytes and alias belonging to that key if the key
 // exists
-func getRawKey(s LimitedFileStore, name string) ([]byte, string, error) {
+func getRawKey(s Storage, name string) ([]byte, string, error) {
 	role, legacy, err := getKeyRole(s, name)
 	if err != nil {
 		return nil, "", err
@@ -327,7 +437,7 @@ func getRawKey(s LimitedFileStore, name string) ([]byte, string, error) {
 	return keyBytes, role, nil
 }
 
-// GetPasswdDecryptBytes gets the password to decript the given pem bytes.
+// GetPasswdDecryptBytes gets the password to decrypt the given pem bytes.
 // Returns the password and private key
 func GetPasswdDecryptBytes(passphraseRetriever passphrase.Retriever, pemBytes []byte, name, alias string) (data.PrivateKey, string, error) {
 	var (
@@ -365,7 +475,7 @@ func GetPasswdDecryptBytes(passphraseRetriever passphrase.Retriever, pemBytes []
 	return privKey, passwd, nil
 }
 
-func encryptAndAddKey(s LimitedFileStore, passwd string, cachedKeys map[string]*cachedKey, name, role string, privKey data.PrivateKey) error {
+func encryptAndAddKey(s Storage, passwd string, cachedKeys map[string]*cachedKey, name, role string, privKey data.PrivateKey) error {
 
 	var (
 		pemPrivKey []byte
@@ -384,22 +494,4 @@ func encryptAndAddKey(s LimitedFileStore, passwd string, cachedKeys map[string]*
 
 	cachedKeys[name] = &cachedKey{alias: role, key: privKey}
 	return s.Add(filepath.Join(getSubdir(role), name), pemPrivKey)
-}
-
-func importKey(s LimitedFileStore, passphraseRetriever passphrase.Retriever, cachedKeys map[string]*cachedKey, alias string, pemBytes []byte) error {
-
-	if alias != data.CanonicalRootRole {
-		return s.Add(alias, pemBytes)
-	}
-
-	privKey, passphrase, err := GetPasswdDecryptBytes(
-		passphraseRetriever, pemBytes, "", "imported "+alias)
-
-	if err != nil {
-		return err
-	}
-
-	var name string
-	name = privKey.ID()
-	return encryptAndAddKey(s, passphrase, cachedKeys, name, alias, privKey)
 }

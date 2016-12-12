@@ -29,7 +29,7 @@ type ImgData struct {
 // indicates the registry's version and whether the registry claims to be a
 // standalone registry.
 type PingResult struct {
-	// Version is the registry version supplied by the registry in a HTTP
+	// Version is the registry version supplied by the registry in an HTTP
 	// header
 	Version string `json:"version"`
 	// Standalone is set to true if the registry indicates it is a
@@ -46,17 +46,17 @@ func (av APIVersion) String() string {
 	return apiVersions[av]
 }
 
-var apiVersions = map[APIVersion]string{
-	1: "v1",
-	2: "v2",
-}
-
 // API Version identifiers.
 const (
-	APIVersionUnknown = iota
-	APIVersion1
+	_                      = iota
+	APIVersion1 APIVersion = iota
 	APIVersion2
 )
+
+var apiVersions = map[APIVersion]string{
+	APIVersion1: "v1",
+	APIVersion2: "v2",
+}
 
 // RepositoryInfo describes a repository
 type RepositoryInfo struct {

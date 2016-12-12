@@ -31,6 +31,7 @@ const (
 	repositoryHeader   = "REPOSITORY"
 	tagHeader          = "TAG"
 	digestHeader       = "DIGEST"
+	mountsHeader       = "MOUNTS"
 )
 
 type containerContext struct {
@@ -142,6 +143,25 @@ func (c *containerContext) Label(name string) string {
 	return c.c.Labels[name]
 }
 
+func (c *containerContext) Mounts() string {
+	c.addHeader(mountsHeader)
+
+	var name string
+	var mounts []string
+	for _, m := range c.c.Mounts {
+		if m.Name == "" {
+			name = m.Source
+		} else {
+			name = m.Name
+		}
+		if c.trunc {
+			name = stringutils.Truncate(name, 15)
+		}
+		mounts = append(mounts, name)
+	}
+	return strings.Join(mounts, ",")
+}
+
 type imageContext struct {
 	baseSubContext
 	trunc  bool
@@ -214,9 +234,10 @@ func (c *baseSubContext) addHeader(header string) {
 }
 
 func stripNamePrefix(ss []string) []string {
+	sss := make([]string, len(ss))
 	for i, s := range ss {
-		ss[i] = s[1:]
+		sss[i] = s[1:]
 	}
 
-	return ss
+	return sss
 }

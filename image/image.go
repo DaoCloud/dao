@@ -29,7 +29,7 @@ type V1Image struct {
 	Created time.Time `json:"created"`
 	// Container is the id of the container used to commit
 	Container string `json:"container,omitempty"`
-	// ContainerConfig  is the configuration of the container that is committed into the image
+	// ContainerConfig is the configuration of the container that is committed into the image
 	ContainerConfig container.Config `json:"container_config,omitempty"`
 	// DockerVersion specifies version on which image is built
 	DockerVersion string `json:"docker_version,omitempty"`
@@ -48,9 +48,11 @@ type V1Image struct {
 // Image stores the image configuration
 type Image struct {
 	V1Image
-	Parent  ID        `json:"parent,omitempty"`
-	RootFS  *RootFS   `json:"rootfs,omitempty"`
-	History []History `json:"history,omitempty"`
+	Parent     ID        `json:"parent,omitempty"`
+	RootFS     *RootFS   `json:"rootfs,omitempty"`
+	History    []History `json:"history,omitempty"`
+	OSVersion  string    `json:"os.version,omitempty"`
+	OSFeatures []string  `json:"os.features,omitempty"`
 
 	// rawJSON caches the immutable JSON associated with this image.
 	rawJSON []byte
@@ -68,6 +70,16 @@ func (img *Image) RawJSON() []byte {
 // ID returns the image's content-addressable ID.
 func (img *Image) ID() ID {
 	return img.computedID
+}
+
+// ImageID stringizes ID.
+func (img *Image) ImageID() string {
+	return string(img.ID())
+}
+
+// RunConfig returns the image's container config.
+func (img *Image) RunConfig() *container.Config {
+	return img.Config
 }
 
 // MarshalJSON serializes the image to JSON. It sorts the top-level keys so
@@ -106,7 +118,7 @@ type History struct {
 
 // Exporter provides interface for exporting and importing images
 type Exporter interface {
-	Load(io.ReadCloser, io.Writer) error
+	Load(io.ReadCloser, io.Writer, bool) error
 	// TODO: Load(net.Context, io.ReadCloser, <- chan StatusMessage) error
 	Save([]string, io.Writer) error
 }

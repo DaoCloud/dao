@@ -10,8 +10,22 @@ import (
 	networktypes "github.com/docker/engine-api/types/network"
 )
 
+// ContainerDecoder implements httputils.ContainerDecoder
+// calling DecodeContainerConfig.
+type ContainerDecoder struct{}
+
+// DecodeConfig makes ContainerDecoder to implement httputils.ContainerDecoder
+func (r ContainerDecoder) DecodeConfig(src io.Reader) (*container.Config, *container.HostConfig, *networktypes.NetworkingConfig, error) {
+	return DecodeContainerConfig(src)
+}
+
+// DecodeHostConfig makes ContainerDecoder to implement httputils.ContainerDecoder
+func (r ContainerDecoder) DecodeHostConfig(src io.Reader) (*container.HostConfig, error) {
+	return DecodeHostConfig(src)
+}
+
 // DecodeContainerConfig decodes a json encoded config into a ContainerConfigWrapper
-// struct and returns both a Config and an HostConfig struct
+// struct and returns both a Config and a HostConfig struct
 // Be aware this function is not checking whether the resulted structs are nil,
 // it's your business to do so
 func DecodeContainerConfig(src io.Reader) (*container.Config, *container.HostConfig, *networktypes.NetworkingConfig, error) {
@@ -44,8 +58,13 @@ func DecodeContainerConfig(src io.Reader) (*container.Config, *container.HostCon
 		return nil, nil, nil, err
 	}
 
-	// Validate the isolation level
-	if err := ValidateIsolationLevel(hc); err != nil {
+	// Validate isolation
+	if err := ValidateIsolation(hc); err != nil {
+		return nil, nil, nil, err
+	}
+
+	// Validate QoS
+	if err := ValidateQoS(hc); err != nil {
 		return nil, nil, nil, err
 	}
 	return w.Config, hc, w.NetworkingConfig, nil

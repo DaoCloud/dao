@@ -279,7 +279,7 @@ func LogInit(logger DevmapperLogger) {
 // SetDevDir sets the dev folder for the device mapper library (usually /dev).
 func SetDevDir(dir string) error {
 	if res := DmSetDevDir(dir); res != 1 {
-		logrus.Debugf("devicemapper: Error dm_set_dev_dir")
+		logrus.Debug("devicemapper: Error dm_set_dev_dir")
 		return ErrSetDevDir
 	}
 	return nil
@@ -357,6 +357,27 @@ func RemoveDeviceDeferred(name string) error {
 	if err := DmTaskDeferredRemove(task.unmanaged); err != 1 {
 		return ErrTaskDeferredRemove
 	}
+
+	// set a task cookie and disable library fallback, or else libdevmapper will
+	// disable udev dm rules and delete the symlink under /dev/mapper by itself,
+	// even if the removal is deferred by the kernel.
+	var cookie uint
+	var flags uint16
+	flags = DmUdevDisableLibraryFallback
+	if err := task.setCookie(&cookie, flags); err != nil {
+		return fmt.Errorf("devicemapper: Can not set cookie: %s", err)
+	}
+
+	// libdevmapper and udev relies on System V semaphore for synchronization,
+	// semaphores created in `task.setCookie` will be cleaned up in `UdevWait`.
+	// So these two function call must come in pairs, otherwise semaphores will
+	// be leaked, and the  limit of number of semaphores defined in `/proc/sys/kernel/sem`
+	// will be reached, which will eventually make all follwing calls to 'task.SetCookie'
+	// fail.
+	// this call will not wait for the deferred removal's final executing, since no
+	// udev event will be generated, and the semaphore's value will not be incremented
+	// by udev, what UdevWait is just cleaning up the semaphore.
+	defer UdevWait(&cookie)
 
 	if err = task.run(); err != nil {
 		return fmt.Errorf("devicemapper: Error running RemoveDeviceDeferred %s", err)

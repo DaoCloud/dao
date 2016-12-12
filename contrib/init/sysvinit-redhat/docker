@@ -24,7 +24,7 @@
 
 prog="docker"
 unshare=/usr/bin/unshare
-exec="/usr/bin/$prog"
+exec="/usr/bin/dockerd"
 pidfile="/var/run/$prog.pid"
 lockfile="/var/lock/subsys/$prog"
 logfile="/var/log/$prog"
@@ -56,7 +56,7 @@ start() {
         prestart
         printf "Starting $prog:\t"
         echo "\n$(date)\n" >> $logfile
-        "$unshare" -m -- $exec daemon $other_args >> $logfile 2>&1 &
+        "$unshare" -m -- $exec $other_args >> $logfile 2>&1 &
         pid=$!
         touch $lockfile
         # wait up to 10 seconds for the pidfile to exist.  see

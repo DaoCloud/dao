@@ -57,7 +57,7 @@ func ParseAdvertise(advertise string) (string, error) {
 		return advertise, nil
 	}
 
-	// If advertise is a valid interface name, get the valid ipv4 address and use it to advertise
+	// If advertise is a valid interface name, get the valid IPv4 address and use it to advertise
 	ifaceName := addr
 	iface, err = net.InterfaceByName(ifaceName)
 	if err != nil {
@@ -89,7 +89,7 @@ func ParseAdvertise(advertise string) (string, error) {
 		return "", fmt.Errorf("couldnt find a valid ip-address in interface %s", advertise)
 	}
 
-	addr = fmt.Sprintf("%s:%s", addr, port)
+	addr = net.JoinHostPort(addr, port)
 	return addr, nil
 }
 

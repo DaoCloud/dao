@@ -124,7 +124,6 @@ func (t *transfer) Broadcast(masterProgressChan <-chan progress.Progress) {
 				default:
 				}
 			}
-
 		} else {
 			t.broadcastDone = true
 		}
@@ -159,18 +158,23 @@ func (t *transfer) Watch(progressOutput progress.Output) *Watcher {
 		defer func() {
 			close(w.running)
 		}()
-		done := false
+		var (
+			done           bool
+			lastWritten    progress.Progress
+			hasLastWritten bool
+		)
 		for {
 			t.mu.Lock()
 			hasLastProgress := t.hasLastProgress
 			lastProgress := t.lastProgress
 			t.mu.Unlock()
 
-			// This might write the last progress item a
-			// second time (since channel closure also gets
-			// us here), but that's fine.
-			if hasLastProgress {
+			// Make sure we don't write the last progress item
+			// twice.
+			if hasLastProgress && (!done || !hasLastWritten || lastProgress != lastWritten) {
 				progressOutput.WriteProgress(lastProgress)
+				lastWritten = lastProgress
+				hasLastWritten = true
 			}
 
 			if done {
@@ -275,6 +279,8 @@ type TransferManager interface {
 	// so, it returns progress and error output from that transfer.
 	// Otherwise, it will call xferFunc to initiate the transfer.
 	Transfer(key string, xferFunc DoFunc, progressOutput progress.Output) (Transfer, *Watcher)
+	// SetConcurrency set the concurrencyLimit so that it is adjustable daemon reload
+	SetConcurrency(concurrency int)
 }
 
 type transferManager struct {
@@ -292,6 +298,13 @@ func NewTransferManager(concurrencyLimit int) TransferManager {
 		concurrencyLimit: concurrencyLimit,
 		transfers:        make(map[string]Transfer),
 	}
+}
+
+// SetConcurrency set the concurrencyLimit
+func (tm *transferManager) SetConcurrency(concurrency int) {
+	tm.mu.Lock()
+	tm.concurrencyLimit = concurrency
+	tm.mu.Unlock()
 }
 
 // Transfer checks if a transfer matching the given key is in progress. If not,
@@ -333,7 +346,7 @@ func (tm *transferManager) Transfer(key string, xferFunc DoFunc, progressOutput 
 	start := make(chan struct{})
 	inactive := make(chan struct{})
 
-	if tm.activeTransfers < tm.concurrencyLimit {
+	if tm.concurrencyLimit == 0 || tm.activeTransfers < tm.concurrencyLimit {
 		close(start)
 		tm.activeTransfers++
 	} else {

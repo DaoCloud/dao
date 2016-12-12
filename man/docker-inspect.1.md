@@ -16,7 +16,7 @@ CONTAINER|IMAGE [CONTAINER|IMAGE...]
 
 This displays all the information available in Docker for a given
 container or image. By default, this will render all results in a JSON
-array. If the container and image have the same name, this will return 
+array. If the container and image have the same name, this will return
 container JSON for unspecified type. If a format is specified, the given
 template will be executed for each result.
 
@@ -110,7 +110,6 @@ To get information on a container use its ID or instance name:
     "Name": "/adoring_wozniak",
     "RestartCount": 0,
     "Driver": "devicemapper",
-    "ExecDriver": "native-0.2",
     "MountLabel": "",
     "ProcessLabel": "",
     "Mounts": [
@@ -209,7 +208,7 @@ To get information on a container use its ID or instance name:
 
 To get the IP address of a container use:
 
-    $ docker inspect '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' d2cc496561d6
+    $ docker inspect --format='{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' d2cc496561d6
     172.17.0.2
 
 ## Listing all port bindings
@@ -224,7 +223,7 @@ output:
 You can get more information about how to write a Go template from:
 https://golang.org/pkg/text/template/.
 
-## Getting size information on an container
+## Getting size information on a container
 
     $ docker inspect -s d2cc496561d6
     [

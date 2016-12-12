@@ -32,11 +32,9 @@ func TestContainerDoubleDelete(t *testing.T) {
 	daemon.containers.Add(container.ID, container)
 
 	// Mark the container as having a delete in progress
-	if err := container.SetRemovalInProgress(); err != nil {
-		t.Fatal(err)
-	}
+	container.SetRemovalInProgress()
 
-	// Try to remove the container when it's start is removalInProgress.
+	// Try to remove the container when its start is removalInProgress.
 	// It should ignore the container and not return an error.
 	if err := daemon.ContainerRm(container.ID, &types.ContainerRmConfig{ForceRemove: true}); err != nil {
 		t.Fatal(err)

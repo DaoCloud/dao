@@ -40,14 +40,16 @@ const (
 
 // KeyStore is a generic interface for private key storage
 type KeyStore interface {
-	// Add Key adds a key to the KeyStore, and if the key already exists,
+	// AddKey adds a key to the KeyStore, and if the key already exists,
 	// succeeds.  Otherwise, returns an error if it cannot add.
-	AddKey(name, alias string, privKey data.PrivateKey) error
-	GetKey(name string) (data.PrivateKey, string, error)
-	ListKeys() map[string]string
-	RemoveKey(name string) error
-	ExportKey(name string) ([]byte, error)
-	ImportKey(pemBytes []byte, alias string) error
+	AddKey(keyInfo KeyInfo, privKey data.PrivateKey) error
+	// Should fail with ErrKeyNotFound if the keystore is operating normally
+	// and knows that it does not store the requested key.
+	GetKey(keyID string) (data.PrivateKey, string, error)
+	GetKeyInfo(keyID string) (KeyInfo, error)
+	ListKeys() map[string]KeyInfo
+	RemoveKey(keyID string) error
+	ExportKey(keyID string) ([]byte, error)
 	Name() string
 }
 

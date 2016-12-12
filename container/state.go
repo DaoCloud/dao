@@ -5,8 +5,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/docker/docker/daemon/execdriver"
-	derr "github.com/docker/docker/errors"
+	"golang.org/x/net/context"
+
 	"github.com/docker/go-units"
 )
 
@@ -24,11 +24,12 @@ type State struct {
 	RemovalInProgress bool // Not need for this to be persistent on disk.
 	Dead              bool
 	Pid               int
-	ExitCode          int
-	Error             string // contains last known error when starting the container
+	exitCode          int
+	error             string // contains last known error when starting the container
 	StartedAt         time.Time
 	FinishedAt        time.Time
 	waitChan          chan struct{}
+	Health            *Health
 }
 
 // NewState creates a default state object with a fresh channel for state changes.
@@ -45,9 +46,12 @@ func (s *State) String() string {
 			return fmt.Sprintf("Up %s (Paused)", units.HumanDuration(time.Now().UTC().Sub(s.StartedAt)))
 		}
 		if s.Restarting {
-			return fmt.Sprintf("Restarting (%d) %s ago", s.ExitCode, units.HumanDuration(time.Now().UTC().Sub(s.FinishedAt)))
+			return fmt.Sprintf("Restarting (%d) %s ago", s.exitCode, units.HumanDuration(time.Now().UTC().Sub(s.FinishedAt)))
 		}
 
+		if h := s.Health; h != nil {
+			return fmt.Sprintf("Up %s (%s)", units.HumanDuration(time.Now().UTC().Sub(s.StartedAt)), h.String())
+		}
 		return fmt.Sprintf("Up %s", units.HumanDuration(time.Now().UTC().Sub(s.StartedAt)))
 	}
 
@@ -67,7 +71,7 @@ func (s *State) String() string {
 		return ""
 	}
 
-	return fmt.Sprintf("Exited (%d) %s ago", s.ExitCode, units.HumanDuration(time.Now().UTC().Sub(s.FinishedAt)))
+	return fmt.Sprintf("Exited (%d) %s ago", s.exitCode, units.HumanDuration(time.Now().UTC().Sub(s.FinishedAt)))
 }
 
 // StateString returns a single string to describe state
@@ -113,29 +117,10 @@ func wait(waitChan <-chan struct{}, timeout time.Duration) error {
 	}
 	select {
 	case <-time.After(timeout):
-		return derr.ErrorCodeTimedOut.WithArgs(timeout)
+		return fmt.Errorf("Timed out: %v", timeout)
 	case <-waitChan:
 		return nil
 	}
-}
-
-// waitRunning waits until state is running. If state is already
-// running it returns immediately. If you want wait forever you must
-// supply negative timeout. Returns pid, that was passed to
-// SetRunning.
-func (s *State) waitRunning(timeout time.Duration) (int, error) {
-	s.Lock()
-	if s.Running {
-		pid := s.Pid
-		s.Unlock()
-		return pid, nil
-	}
-	waitChan := s.waitChan
-	s.Unlock()
-	if err := wait(waitChan, timeout); err != nil {
-		return -1, err
-	}
-	return s.GetPID(), nil
 }
 
 // WaitStop waits until state is stopped. If state already stopped it returns
@@ -144,7 +129,7 @@ func (s *State) waitRunning(timeout time.Duration) (int, error) {
 func (s *State) WaitStop(timeout time.Duration) (int, error) {
 	s.Lock()
 	if !s.Running {
-		exitCode := s.ExitCode
+		exitCode := s.exitCode
 		s.Unlock()
 		return exitCode, nil
 	}
@@ -153,7 +138,38 @@ func (s *State) WaitStop(timeout time.Duration) (int, error) {
 	if err := wait(waitChan, timeout); err != nil {
 		return -1, err
 	}
-	return s.getExitCode(), nil
+	s.Lock()
+	defer s.Unlock()
+	return s.ExitCode(), nil
+}
+
+// WaitWithContext waits for the container to stop. Optional context can be
+// passed for canceling the request.
+func (s *State) WaitWithContext(ctx context.Context) error {
+	// todo(tonistiigi): make other wait functions use this
+	s.Lock()
+	if !s.Running {
+		state := *s
+		defer s.Unlock()
+		if state.exitCode == 0 {
+			return nil
+		}
+		return &state
+	}
+	waitChan := s.waitChan
+	s.Unlock()
+	select {
+	case <-waitChan:
+		s.Lock()
+		state := *s
+		s.Unlock()
+		if state.exitCode == 0 {
+			return nil
+		}
+		return &state
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // IsRunning returns whether the running flag is set. Used by Container to check whether a container is running.
@@ -172,36 +188,43 @@ func (s *State) GetPID() int {
 	return res
 }
 
-func (s *State) getExitCode() int {
-	s.Lock()
-	res := s.ExitCode
-	s.Unlock()
+// ExitCode returns current exitcode for the state. Take lock before if state
+// may be shared.
+func (s *State) ExitCode() int {
+	res := s.exitCode
 	return res
 }
 
+// SetExitCode sets current exitcode for the state. Take lock before if state
+// may be shared.
+func (s *State) SetExitCode(ec int) {
+	s.exitCode = ec
+}
+
 // SetRunning sets the state of the container to "running".
-func (s *State) SetRunning(pid int) {
-	s.Error = ""
+func (s *State) SetRunning(pid int, initial bool) {
+	s.error = ""
 	s.Running = true
 	s.Paused = false
 	s.Restarting = false
-	s.ExitCode = 0
+	s.exitCode = 0
 	s.Pid = pid
-	s.StartedAt = time.Now().UTC()
-	close(s.waitChan) // fire waiters for start
-	s.waitChan = make(chan struct{})
+	if initial {
+		s.StartedAt = time.Now().UTC()
+	}
 }
 
-// SetStoppedLocking locks the container state is sets it to "stopped".
-func (s *State) SetStoppedLocking(exitStatus *execdriver.ExitStatus) {
+// SetStoppedLocking locks the container state and sets it to "stopped".
+func (s *State) SetStoppedLocking(exitStatus *ExitStatus) {
 	s.Lock()
 	s.SetStopped(exitStatus)
 	s.Unlock()
 }
 
 // SetStopped sets the container state to "stopped" without locking.
-func (s *State) SetStopped(exitStatus *execdriver.ExitStatus) {
+func (s *State) SetStopped(exitStatus *ExitStatus) {
 	s.Running = false
+	s.Paused = false
 	s.Restarting = false
 	s.Pid = 0
 	s.FinishedAt = time.Now().UTC()
@@ -212,7 +235,7 @@ func (s *State) SetStopped(exitStatus *execdriver.ExitStatus) {
 
 // SetRestartingLocking is when docker handles the auto restart of containers when they are
 // in the middle of a stop and being restarted again
-func (s *State) SetRestartingLocking(exitStatus *execdriver.ExitStatus) {
+func (s *State) SetRestartingLocking(exitStatus *ExitStatus) {
 	s.Lock()
 	s.SetRestarting(exitStatus)
 	s.Unlock()
@@ -220,7 +243,7 @@ func (s *State) SetRestartingLocking(exitStatus *execdriver.ExitStatus) {
 
 // SetRestarting sets the container state to "restarting".
 // It also sets the container PID to 0.
-func (s *State) SetRestarting(exitStatus *execdriver.ExitStatus) {
+func (s *State) SetRestarting(exitStatus *ExitStatus) {
 	// we should consider the container running when it is restarting because of
 	// all the checks in docker around rm/stop/etc
 	s.Running = true
@@ -236,7 +259,7 @@ func (s *State) SetRestarting(exitStatus *execdriver.ExitStatus) {
 // know the error that occurred when container transits to another state
 // when inspecting it
 func (s *State) SetError(err error) {
-	s.Error = err.Error()
+	s.error = err.Error()
 }
 
 // IsPaused returns whether the container is paused or not.
@@ -256,17 +279,18 @@ func (s *State) IsRestarting() bool {
 }
 
 // SetRemovalInProgress sets the container state as being removed.
-func (s *State) SetRemovalInProgress() error {
+// It returns true if the container was already in that state.
+func (s *State) SetRemovalInProgress() bool {
 	s.Lock()
 	defer s.Unlock()
 	if s.RemovalInProgress {
-		return derr.ErrorCodeAlreadyRemoving
+		return true
 	}
 	s.RemovalInProgress = true
-	return nil
+	return false
 }
 
-// ResetRemovalInProgress make the RemovalInProgress state to false.
+// ResetRemovalInProgress makes the RemovalInProgress state to false.
 func (s *State) ResetRemovalInProgress() {
 	s.Lock()
 	s.RemovalInProgress = false
@@ -278,4 +302,9 @@ func (s *State) SetDead() {
 	s.Lock()
 	s.Dead = true
 	s.Unlock()
+}
+
+// Error returns current error for the state.
+func (s *State) Error() string {
+	return s.error
 }
