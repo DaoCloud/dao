@@ -1,45 +1,183 @@
-# DAO Roadmap
+Docker Engine Roadmap
+=====================
 
-## 如何使用此文档？
+### How should I use this document?
 
-此文档项目详细介绍了Dao项目的发展目标以及优先级。此文档也可以作为一个参考，帮助Dao项目的贡献者了解，Dao项目在社区的努力下，当前的发展现状。
+This document provides description of items that the project decided to prioritize. This should
+serve as a reference point for Docker contributors to understand where the project is going, and
+help determine if a contribution could be conflicting with some longer terms plans.
 
-## 如何参与在Roadmap中添加内容？
+The fact that a feature isn't listed here doesn't mean that a patch for it will automatically be
+refused (except for those mentioned as "frozen features" below)! We are always happy to receive
+patches for new cool features we haven't thought about, or didn't judge priority. Please however
+understand that such patches might take longer for us to review.
 
-此Roadmap进程对于项目来说还比较新颖：我们刚刚开始这样的组织形式，另外将项目目标文档化，呈现于所有的参与者。我们的中期目标是：将该项目的发展变得更加透明，另外和社区共同努力，将精力花在更多高优先级的工作。
+### How can I help?
 
-我们希望在不远的将来，所有贡献者都可以在Roadmap中添加一个具有十足意义的话题。
+Short term objectives are listed in the [wiki](https://github.com/docker/docker/wiki) and described
+in [Issues](https://github.com/docker/docker/issues?q=is%3Aopen+is%3Aissue+label%3Aroadmap). Our
+goal is to split down the workload in such way that anybody can jump in and help. Please comment on
+issues if you want to take it to avoid duplicating effort! Similarly, if a maintainer is already
+assigned on an issue you'd like to participate in, pinging him on IRC or GitHub to offer your help is
+the best way to go.
 
-## 特性与重构
+### How can I add something to the roadmap?
 
-### 1.1 Docker命令行工具汉化版
+The roadmap process is new to the Docker Engine: we are only beginning to structure and document the
+project objectives. Our immediate goal is to be more transparent, and work with our community to
+focus our efforts on fewer prioritized topics.
 
-一款优秀软件的发展，自然离不开拉近和用户的距离。[Docker](https://github.com/docker/docker)是工业界容器生态中最活跃的项目，在中国范围内，以及积累了大量的用户群体。然而，如何高效的使用Docker，让Docker更接近本土化，依然存在一部分的鸿沟。
+We hope to offer in the near future a process allowing anyone to propose a topic to the roadmap, but
+we are not quite there yet. For the time being, the BDFL remains the keeper of the roadmap, and we
+won't be accepting pull requests adding or removing items from this file.
 
-Dao项目的第一个任务是：**完成 Docker Cli 的汉化功能**。保障用户使用Dao软件来感受汉化的Cli工具。由于当前为止，Docker的发行版本，本项目会有针对性的完善各版本的汉化能力。
+# 1. Features and refactoring
 
-#### 兼容性
+## 1.1 Security
 
-原则上，Dao软件和Docker Cli对于Docker守护进程的API调用完全兼容，即命令调用完成兼容，比如`docker ps`和`dao ps`的结果完成相同，调用的API也完全相同。
+Security is a top objective for the Docker Engine. The most notable items we intend to provide in
+the near future are:
 
-#### 差异化功能
+- Trusted distribution of images: the effort is driven by the [distribution](https://github.com/docker/distribution)
+group but will have significant impact on the Engine
+- [User namespaces](https://github.com/docker/docker/pull/12648)
+- [Seccomp support](https://github.com/docker/libcontainer/pull/613)
 
-另外，有极少部分的命令会不兼容，比如,`docker pull ubuntu:14.04`和`dao pull ubuntu:14.04`。`docker pull ubuntu:14.04`会从Docker Hub下载镜像，由于国内连接Docker Hub的网络问题，导致下载速度缓慢。`dao pull` 会从国内高效的镜像加速器下载镜像。
+## 1.2 Plumbing project
 
-### 1.2 额外的Docker运维功能
+We define a plumbing tool as a standalone piece of software usable and meaningful on its own. In
+the current state of the Docker Engine, most subsystems provide independent functionalities (such
+the builder, pushing and pulling images, running applications in a containerized environment, etc)
+but all are coupled in a single binary.  We want to offer the users to flexibility to use only the
+pieces they need, and we will also gain in maintainability by splitting the project among multiple
+repositories.
 
-Docker的运维工具包toolkit。众所周知，Docker软件的管理过程中，可能会出现一些额外的需求，比如：
+As it currently stands, the rough design outlines is to have:
+- Low level plumbing tools, each dealing with one responsibility (e.g., [runC](https://runc.io))
+- Docker subsystems services, each exposing an elementary concept over an API, and relying on one or
+multiple lower level plumbing tools for their implementation (e.g., network management)
+- Docker Engine to expose higher level actions (e.g., create a container with volume `V` and network
+`N`), while still providing pass-through access to the individual subsystems.
 
-* 实现底层容器的细致化管理;
-* 容器日志的定制化操作;
-* Docker镜像的个性化管理;
-* 容器与底层进程的实际关系等;
-* 容器存储卷的管理能力
-* ……
+The architectural details are still being worked on, but one thing we know for sure is that we need
+to technically decouple the pieces.
 
-### 1.3 Dao的远程能力
+### 1.2.1 Runtime
 
-单机的Dao能力，可以提高Docker的使用体验，增强用户的容器运维能力。Dao的远程能力同样帮助用户完成更好的功能。To be designed.
+A Runtime tool already exists today in the form of [runC](https://github.com/opencontainers/runc).
+We intend to modify the Engine to directly call out to a binary implementing the Open Containers
+Specification such as runC rather than relying on libcontainer to set the container runtime up.
 
+This plan will deprecate the existing [`execdriver`](https://github.com/docker/docker/tree/master/daemon/execdriver)
+as different runtime backends will be implemented as separated binaries instead of being compiled
+into the Engine.
 
+### 1.2.2 Builder
 
+The Builder (i.e., the ability to build an image from a Dockerfile) is already nicely decoupled,
+but would benefit from being entirely separated from the Engine, and rely on the standard Engine
+API for its operations.
+
+### 1.2.3 Distribution
+
+Distribution already has a [dedicated repository](https://github.com/docker/distribution) which
+holds the implementation for Registry v2 and client libraries. We could imagine going further by
+having the Engine call out to a binary providing image distribution related functionalities.
+
+There are two short term goals related to image distribution. The first is stabilize and simplify
+the push/pull code. Following that is the conversion to the more secure Registry V2 protocol.
+
+### 1.2.4 Networking
+
+Most of networking related code was already decoupled today in [libnetwork](https://github.com/docker/libnetwork).
+As with other ingredients, we might want to take it a step further and make it a meaningful utility
+that the Engine would call out to instead of a library.
+
+## 1.3 Plugins
+
+An initiative around plugins started with Docker 1.7.0, with the goal of allowing for out of
+process extensibility of some Docker functionalities, starting with volumes and networking. The
+approach is to provide specific extension points rather than generic hooking facilities. We also
+deliberately keep the extensions API the simplest possible, expanding as we discover valid use
+cases that cannot be implemented.
+
+At the time of writing:
+
+- Plugin support is merged as an experimental feature: real world use cases and user feedback will
+help us refine the UX to make the feature more user friendly.
+- There are no immediate plans to expand on the number of pluggable subsystems.
+- Golang 1.5 might add language support for [plugins](https://docs.google.com/document/d/1nr-TQHw_er6GOQRsF6T43GGhFDelrAP0NqSS_00RgZQ)
+which we consider supporting as an alternative to JSON/HTTP.
+
+## 1.4 Volume management
+
+Volumes are not a first class citizen in the Engine today: we would like better volume management,
+similar to the way network are managed in the new [CNM](https://github.com/docker/docker/issues/9983).
+
+## 1.5 Better API implementation
+
+The current Engine API is insufficiently typed, versioned, and ultimately hard to maintain. We
+also suffer from the lack of a common implementation with [Swarm](https://github.com/docker/swarm).
+
+## 1.6 Checkpoint/restore
+
+Support for checkpoint/restore was [merged](https://github.com/docker/libcontainer/pull/479) in
+[libcontainer](https://github.com/docker/libcontainer) and made available through [runC](https://runc.io):
+we intend to take advantage of it in the Engine.
+
+# 2 Frozen features
+
+## 2.1 Docker exec
+
+We won't accept patches expanding the surface of `docker exec`, which we intend to keep as a
+*debugging* feature, as well as being strongly dependent on the Runtime ingredient effort.
+
+## 2.2 Dockerfile syntax
+
+The Dockerfile syntax as we know it is simple, and has proven successful in supporting all our
+[official images](https://github.com/docker-library/official-images). Although this is *not* a
+definitive move, we temporarily won't accept more patches to the Dockerfile syntax for several
+reasons:
+
+- Long term impact of syntax changes is a sensitive matter that require an amount of attention
+the volume of Engine codebase and activity today doesn't allow us to provide.
+- Allowing the Builder to be implemented as a separate utility consuming the Engine's API will
+open the door for many possibilities, such as offering alternate syntaxes or DSL for existing
+languages without cluttering the Engine's codebase.
+- A standalone Builder will also offer the opportunity for a better dedicated group of maintainers
+to own the Dockerfile syntax and decide collectively on the direction to give it.
+- Our experience with official images tend to show that no new instruction or syntax expansion is
+*strictly* necessary for the majority of use cases, and although we are aware many things are still
+lacking for many, we cannot make it a priority yet for the above reasons.
+
+Again, this is not about saying that the Dockerfile syntax is done, it's about making choices about
+what we want to do first!
+
+## 2.3 Remote Registry Operations
+
+A large amount of work is ongoing in the area of image distribution and
+provenance. This includes moving to the V2 Registry API and heavily
+refactoring the code that powers these features. The desired result is more
+secure, reliable and easier to use image distribution.
+
+Part of the problem with this part of the code base is the lack of a stable
+and flexible interface. If new features are added that access the registry
+without solidifying these interfaces, achieving feature parity will continue
+to be elusive. While we get a handle on this situation, we are imposing a
+moratorium on new code that accesses the Registry API in commands that don't
+already make remote calls.
+
+Currently, only the following commands cause interaction with a remote
+registry:
+
+- push
+- pull
+- run
+- build
+- search
+- login
+
+In the interest of stabilizing the registry access model during this ongoing
+work, we are not accepting additions to other commands that will cause remote
+interaction with the Registry API. This moratorium will lift when the goals of
+the distribution project have been met.
